@@ -33,10 +33,13 @@ SMTP_TO             = os.getenv("SMTP_TO",          "")
 ALERT_DB_PATH       = os.getenv("ALERT_DB_PATH", "/data/dalybms/alerts.db")
 CHECK_INTERVAL      = float(os.getenv("ALERT_CHECK_INTERVAL", "1.0"))
 
-BMS_NAMES = {
-    0x01: os.getenv("ALERT_BMS1_NAME", "Pack 320Ah"),
-    0x02: os.getenv("ALERT_BMS2_NAME", "Pack 360Ah"),
-}
+def _load_bms_names() -> dict[int, str]:
+    """Construit le dict {bms_id: nom} depuis DALY_ADDRESSES + ALERT_BMS{N}_NAME."""
+    raw = os.getenv("DALY_ADDRESSES", "0x01,0x02")
+    ids = sorted({int(x.strip(), 0) for x in raw.split(",") if x.strip()})
+    return {bid: os.getenv(f"ALERT_BMS{bid}_NAME", f"BMS {bid}") for bid in ids}
+
+BMS_NAMES = _load_bms_names()
 
 
 # ─── Sévérité ─────────────────────────────────────────────────────────────────

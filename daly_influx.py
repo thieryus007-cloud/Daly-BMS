@@ -30,10 +30,13 @@ BATCH_INTERVAL_S  = float(os.getenv("INFLUX_BATCH_INTERVAL", "5.0"))
 RETENTION_DAYS    = int(os.getenv("INFLUX_RETENTION_DAYS", "30"))
 WRITE_INTERVAL    = float(os.getenv("INFLUX_WRITE_INTERVAL", "1.0"))
 
-BMS_NAMES = {
-    0x01: os.getenv("INFLUX_BMS1_NAME", "pack_320ah"),
-    0x02: os.getenv("INFLUX_BMS2_NAME", "pack_360ah"),
-}
+def _load_bms_names() -> dict[int, str]:
+    """Construit le dict {bms_id: nom} depuis DALY_ADDRESSES + INFLUX_BMS{N}_NAME."""
+    raw = os.getenv("DALY_ADDRESSES", "0x01,0x02")
+    ids = sorted({int(x.strip(), 0) for x in raw.split(",") if x.strip()})
+    return {bid: os.getenv(f"INFLUX_BMS{bid}_NAME", f"bms{bid:02d}") for bid in ids}
+
+BMS_NAMES = _load_bms_names()
 
 INSTALLATION = os.getenv("INFLUX_INSTALLATION", "santuario")
 

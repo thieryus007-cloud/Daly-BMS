@@ -20,12 +20,13 @@ const C = {
 };
 
 // ─── Noms BMS ────────────────────────────────────────────────────────────────
-const BMS_NAMES = { 1: "Pack 320Ah", 2: "Pack 360Ah" };
+// Chargés depuis /api/v1/config au démarrage — fallback générique si non disponible
+const BMS_NAMES = {};
+const getBmsName = id => BMS_NAMES[id] || `BMS ${id}`;
 
 // ─── Mock data (état initial avant connexion WS) ──────────────────────────────
 function generateSnapshot(bmsId, t = Date.now()) {
-  const base = bmsId === 1 ? 320 : 360;
-  const soc  = 72 + Math.sin(t / 30000) * 8;
+  const base = 320;  // capacité générique pour le mock
   const cells = Array.from({ length: 16 }, (_, i) => {
     const v = 3310 + Math.sin(t / 5000 + i) * 15
       + (i === 7 ? 45 : 0) + (i === 15 ? 38 : 0);
@@ -33,7 +34,7 @@ function generateSnapshot(bmsId, t = Date.now()) {
   });
   return {
     bms_id:         bmsId,
-    bms_name:       BMS_NAMES[bmsId],
+    bms_name:       getBmsName(bmsId),
     soc:            +soc.toFixed(1),
     pack_voltage:   +(cells.reduce((a, b) => a + b, 0) / 1000).toFixed(2),
     pack_current:   +(12 + Math.sin(t / 8000) * 5).toFixed(1),
@@ -50,7 +51,7 @@ function generateSnapshot(bmsId, t = Date.now()) {
     temp_min:       27.8,
     charge_mos:     true,
     discharge_mos:  true,
-    bms_cycles:     bmsId === 1 ? 147 : 89,
+    bms_cycles:     100 + bmsId * 20,
     remaining_capacity: +(base * soc / 100).toFixed(1),
     balancing_mask: cells.map(v => v === Math.max(...cells) ? 1 : 0),
     any_alarm:      false,
@@ -85,7 +86,7 @@ function normalizeSnapshot(raw) {
 
   return {
     ...raw,
-    bms_name:     BMS_NAMES[id] || `BMS ${id}`,
+    bms_name:     getBmsName(id),
     cell_voltages,
     temperatures,
     alarms,
@@ -94,6 +95,22 @@ function normalizeSnapshot(raw) {
 
 // ─── Hooks ────────────────────────────────────────────────────────────────────
 
+// Charge la configuration BMS depuis /api/v1/config (noms, IDs actifs)
+function useConfig() {
+  useEffect(() => {
+    fetch("/api/v1/config")
+      .then(r => r.ok ? r.json() : null)
+      .then(cfg => {
+        if (cfg?.bms_names) {
+          Object.entries(cfg.bms_names).forEach(([id, name]) => {
+            BMS_NAMES[+id] = name;
+          });
+        }
+      })
+      .catch(() => {});
+  }, []);
+}
+
 // WebSocket live — se connecte à /ws/bms/stream, fallback sur mock
 function useLiveData() {
   const [data, setData] = useState({
@@ -101,7 +118,7 @@ function useLiveData() {
     2: generateSnapshot(2),
   });
   const [connected, setConnected] = useState(false);
-  const histRef   = useRef({ 1: [], 2: [] });
+  const histRef   = useRef({});
   const wsRef     = useRef(null);
 
   useEffect(() => {
@@ -125,11 +142,11 @@ function useLiveData() {
             });
             setData(next);
             const ts = Date.now();
-            [1, 2].forEach(id => {
-              if (next[id]) {
-                histRef.current[id].push({ ...next[id], ts });
-                if (histRef.current[id].length > 180) histRef.current[id].shift();
-              }
+            Object.keys(next).forEach(k => {
+              const id = +k;
+              if (!histRef.current[id]) histRef.current[id] = [];
+              histRef.current[id].push({ ...next[id], ts });
+              if (histRef.current[id].length > 180) histRef.current[id].shift();
             });
           }
         } catch (_) { /* ignore parse errors */ }
@@ -431,7 +448,7 @@ function NavBar({ page, setPage, data, connected }) {
 
       {/* Status indicators */}
       <div style={{ display: "flex", gap: 12, marginLeft: 16, alignItems: "center" }}>
-        {[1, 2].map(id => (
+        {Object.keys(data).map(Number).sort().map(id => (
           <div key={id} style={{ display: "flex", alignItems: "center", gap: 5 }}>
             <div style={{
               width: 7, height: 7, borderRadius: "50%",
@@ -461,10 +478,11 @@ function NavBar({ page, setPage, data, connected }) {
 }
 
 // ─── BMS Selector ─────────────────────────────────────────────────────────────
-function BmsSelector({ selected, setSelected }) {
+function BmsSelector({ data, selected, setSelected }) {
+  const ids = Object.keys(data).map(Number).sort();
   return (
     <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-      {[1, 2].map(id => (
+      {ids.map(id => (
         <button key={id} onClick={() => setSelected(id)} style={{
           padding: "6px 16px", borderRadius: 6, cursor: "pointer",
           background: selected === id ? C.primary : "transparent",
@@ -473,7 +491,7 @@ function BmsSelector({ selected, setSelected }) {
           fontFamily: "'Space Mono', monospace", fontSize: 11,
           letterSpacing: 1,
         }}>
-          BMS {id} — {id === 1 ? "320Ah" : "360Ah"}
+          {getBmsName(id)}
         </button>
       ))}
     </div>
@@ -495,7 +513,7 @@ function PageDashboard({ data, history }) {
 
   return (
     <div>
-      <BmsSelector selected={sel} setSelected={setSel}/>
+      <BmsSelector data={data} selected={sel} setSelected={setSel}/>
       <div style={{ display: "grid", gridTemplateColumns: "200px 1fr 1fr 1fr", gap: 12 }}>
         {/* SOC Gauge */}
         <Card style={{ display: "flex", flexDirection: "column",
@@ -614,7 +632,7 @@ function PageCells({ data, history }) {
 
   return (
     <div>
-      <BmsSelector selected={sel} setSelected={setSel}/>
+      <BmsSelector data={data} selected={sel} setSelected={setSel}/>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 320px", gap: 12 }}>
         <div>
           {/* Grille cellules */}
@@ -726,7 +744,7 @@ function PageTemperatures({ data, history }) {
 
   return (
     <div>
-      <BmsSelector selected={sel} setSelected={setSel}/>
+      <BmsSelector data={data} selected={sel} setSelected={setSel}/>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
         {temps.map((t, i) => (
           <Card key={i}>
@@ -843,10 +861,10 @@ function PageAlarms({ data }) {
       </div>
 
       {/* Tableau des flags */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-        {[1, 2].map(bmsId => (
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12 }}>
+        {Object.keys(data).map(Number).sort().map(bmsId => (
           <Card key={bmsId}>
-            <Label>BMS {bmsId} — {bmsId === 1 ? "Pack 320Ah" : "Pack 360Ah"}</Label>
+            <Label>BMS {bmsId} — {getBmsName(bmsId)}</Label>
             <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
               {Object.entries(data[bmsId]?.alarms || {}).map(([key, val]) => (
                 <div key={key} style={{
@@ -950,7 +968,7 @@ function PageControl({ data }) {
 
   return (
     <div>
-      <BmsSelector selected={sel} setSelected={setSel}/>
+      <BmsSelector data={data} selected={sel} setSelected={setSel}/>
 
       {feedback && (
         <div style={{
@@ -1118,7 +1136,7 @@ function PageConfig() {
 
   return (
     <div>
-      <BmsSelector selected={sel} setSelected={setSel}/>
+      <BmsSelector data={data} selected={sel} setSelected={setSel}/>
 
       <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
         {Object.entries(GROUPS).map(([key, g]) => (
@@ -1195,6 +1213,17 @@ function PageConfig() {
 // PAGE 7 — DUAL BMS
 // ═══════════════════════════════════════════════════════════════════════════════
 function PageDual({ data }) {
+  const ids = Object.keys(data).map(Number).sort();
+  const [selA, setSelA] = useState(ids[0] ?? 1);
+  const [selB, setSelB] = useState(ids[1] ?? 2);
+  // Resync si les IDs changent (ex: BMS ajouté après connexion WS)
+  useEffect(() => {
+    if (ids.length > 0 && !data[selA]) setSelA(ids[0]);
+    if (ids.length > 1 && !data[selB]) setSelB(ids[1]);
+  }, [ids.join(",")]);  // eslint-disable-line
+
+  const d1 = data[selA] || {}, d2 = data[selB] || {};
+
   const Row = ({ label, v1, v2, unit = "", format = x => x, colorFn = () => C.text }) => (
     <div style={{
       display: "grid", gridTemplateColumns: "1fr 180px 1fr",
@@ -1214,22 +1243,50 @@ function PageDual({ data }) {
     </div>
   );
 
-  const d1 = data[1] || {}, d2 = data[2] || {};
+  const BmsPickRow = () => (
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 180px 1fr", gap: 8, marginBottom: 12 }}>
+      <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+        {ids.map(id => (
+          <button key={id} onClick={() => setSelA(id)} style={{
+            padding: "4px 12px", borderRadius: 5, cursor: "pointer", fontSize: 10,
+            background: selA === id ? C.primary + "33" : "transparent",
+            border: `1px solid ${selA === id ? C.primary : C.border}`,
+            color: selA === id ? C.primary : C.textMuted,
+            fontFamily: "'Space Mono', monospace",
+          }}>{getBmsName(id)}</button>
+        ))}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <span style={{ fontSize: 10, color: C.textMuted,
+          fontFamily: "'Space Mono', monospace", letterSpacing: 2 }}>VS</span>
+      </div>
+      <div style={{ display: "flex", gap: 6 }}>
+        {ids.map(id => (
+          <button key={id} onClick={() => setSelB(id)} style={{
+            padding: "4px 12px", borderRadius: 5, cursor: "pointer", fontSize: 10,
+            background: selB === id ? C.accent + "33" : "transparent",
+            border: `1px solid ${selB === id ? C.accent : C.border}`,
+            color: selB === id ? C.accent : C.textMuted,
+            fontFamily: "'Space Mono', monospace",
+          }}>{getBmsName(id)}</button>
+        ))}
+      </div>
+    </div>
+  );
 
   return (
     <div>
-      {/* Headers */}
+      <BmsPickRow />
+
+      {/* Headers SOC */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 180px 1fr", marginBottom: 12 }}>
         <Card style={{ textAlign: "right", marginRight: 6 }}>
-          <Label>BMS 1 — Pack 320Ah</Label>
+          <Label>{getBmsName(selA)}</Label>
           <BigVal value={d1.soc?.toFixed(1)} unit="%" color={C.primary} size={28}/>
         </Card>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <span style={{ fontSize: 10, color: C.textMuted,
-            fontFamily: "'Space Mono', monospace", letterSpacing: 2 }}>VS</span>
-        </div>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center" }}/>
         <Card style={{ marginLeft: 6 }}>
-          <Label>BMS 2 — Pack 360Ah</Label>
+          <Label>{getBmsName(selB)}</Label>
           <BigVal value={d2.soc?.toFixed(1)} unit="%" color={C.accent} size={28}/>
         </Card>
       </div>
@@ -1256,11 +1313,9 @@ function PageDual({ data }) {
           unit="°C" format={v => v?.toFixed(1)}
           colorFn={v => v > 40 ? C.red : v > 35 ? C.yellow : C.text}/>
         <Row label="CHG MOS"         v1={d1.charge_mos}    v2={d2.charge_mos}
-          format={v => v ? "ON" : "OFF"}
-          colorFn={v => v ? C.green : C.red}/>
+          format={v => v ? "ON" : "OFF"}  colorFn={v => v ? C.green : C.red}/>
         <Row label="DSG MOS"         v1={d1.discharge_mos} v2={d2.discharge_mos}
-          format={v => v ? "ON" : "OFF"}
-          colorFn={v => v ? C.green : C.red}/>
+          format={v => v ? "ON" : "OFF"}  colorFn={v => v ? C.green : C.red}/>
         <Row label="Cycles"          v1={d1.bms_cycles}    v2={d2.bms_cycles}
           format={v => v}/>
         <Row label="Alarme active"   v1={d1.any_alarm}     v2={d2.any_alarm}
@@ -1268,30 +1323,30 @@ function PageDual({ data }) {
           colorFn={v => v ? C.red : C.green}/>
       </Card>
 
-      {/* Barre comparaison SOC */}
+      {/* Barres SOC pour tous les BMS */}
       <Card style={{ marginTop: 12 }}>
-        <Label>Comparaison SOC</Label>
-        {[
-          { id: 1, soc: d1.soc, color: C.primary, label: "Pack 320Ah" },
-          { id: 2, soc: d2.soc, color: C.accent,  label: "Pack 360Ah" },
-        ].map(({ id, soc, color, label }) => (
-          <div key={id} style={{ marginTop: 12 }}>
-            <div style={{ display: "flex", justifyContent: "space-between",
-              marginBottom: 6 }}>
-              <span style={{ fontSize: 10, color: C.textMuted,
-                fontFamily: "'Space Mono', monospace" }}>{label}</span>
-              <span style={{ fontSize: 10, color,
-                fontFamily: "'Space Mono', monospace" }}>{soc?.toFixed(1)}%</span>
+        <Label>Comparaison SOC — tous les BMS</Label>
+        {ids.map((id, i) => {
+          const soc   = data[id]?.soc;
+          const color = i === 0 ? C.primary : i === 1 ? C.accent : i === 2 ? C.green : C.orange;
+          return (
+            <div key={id} style={{ marginTop: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                <span style={{ fontSize: 10, color: C.textMuted,
+                  fontFamily: "'Space Mono', monospace" }}>{getBmsName(id)}</span>
+                <span style={{ fontSize: 10, color,
+                  fontFamily: "'Space Mono', monospace" }}>{soc?.toFixed(1)}%</span>
+              </div>
+              <div style={{ height: 10, background: C.border, borderRadius: 5 }}>
+                <div style={{
+                  height: "100%", width: `${soc || 0}%`, borderRadius: 5,
+                  background: `linear-gradient(90deg, ${color}88, ${color})`,
+                  transition: "width 0.5s ease",
+                }}/>
+              </div>
             </div>
-            <div style={{ height: 10, background: C.border, borderRadius: 5 }}>
-              <div style={{
-                height: "100%", width: `${soc || 0}%`, borderRadius: 5,
-                background: `linear-gradient(90deg, ${color}88, ${color})`,
-                transition: "width 0.5s ease",
-              }}/>
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </Card>
     </div>
   );
@@ -1304,7 +1359,10 @@ function PageStats({ data, history }) {
   const [sel, setSel] = useState(1);
   const d    = data[sel] || {};
   const hist = history[sel] || [];
-  const cap  = sel === 1 ? 320 : 360;
+  // Estime la capacité nominale depuis les données BMS (remaining_cap / soc)
+  const cap  = (d.remaining_capacity && d.soc)
+    ? Math.round(d.remaining_capacity / (d.soc / 100))
+    : 320;
 
   // Données journalières simulées
   const dailyEnergy = Array.from({ length: 7 }, (_, i) => ({
@@ -1317,7 +1375,7 @@ function PageStats({ data, history }) {
 
   return (
     <div>
-      <BmsSelector selected={sel} setSelected={setSel}/>
+      <BmsSelector data={data} selected={sel} setSelected={setSel}/>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
         {[
@@ -1428,6 +1486,7 @@ function PageStats({ data, history }) {
 // ═══════════════════════════════════════════════════════════════════════════════
 export default function App() {
   const [page, setPage]     = useState("dashboard");
+  useConfig();
   const { data, history, connected } = useLiveData();
 
   const PAGE_MAP = {

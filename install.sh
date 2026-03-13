@@ -255,15 +255,26 @@ DALY_POLL_INTERVAL=1.0
 DALY_CELL_COUNT=16
 DALY_SENSOR_COUNT=4
 
-# BMS addresses (hex)
-# BMS1 = Pack 320Ah = 0x01
-# BMS2 = Pack 360Ah = 0x02
+# Adresses BMS sur le bus RS485 — ajouter les adresses supplémentaires ici
+# RS485 supporte jusqu'à 32 BMS par segment — protocole Daly : 255 adresses
+# Pour 3 BMS : DALY_ADDRESSES=0x01,0x02,0x03
+# Pour 4 BMS : DALY_ADDRESSES=0x01,0x02,0x03,0x04
 DALY_ADDRESSES=0x01,0x02
+# Découverte automatique (0=désactivé, 1=activer pour détecter nouveaux BMS)
+DALY_AUTO_DISCOVER=0
 
 BMS1_CAPACITY_AH=320
 BMS2_CAPACITY_AH=360
+BMS3_CAPACITY_AH=0
+BMS4_CAPACITY_AH=0
 BMS1_PRODUCT_NAME=Daly LiFePO4 320Ah
 BMS2_PRODUCT_NAME=Daly LiFePO4 360Ah
+BMS3_PRODUCT_NAME=Daly LiFePO4 XXXAh
+BMS4_PRODUCT_NAME=Daly LiFePO4 XXXAh
+BMS1_NAME=Pack 320Ah
+BMS2_NAME=Pack 360Ah
+BMS3_NAME=Pack BMS 3
+BMS4_NAME=Pack BMS 4
 
 # ── MQTT local (Mosquitto RPi CM5) ───────────────────────────────────────────
 MQTT_HOST=localhost
