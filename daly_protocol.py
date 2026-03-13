@@ -373,13 +373,53 @@ class DalyPort:
         self._writer: Optional[asyncio.StreamWriter]  = None
         self._lock = asyncio.Lock()
 
-    async def open(self):
+    @property
+    def is_open(self) -> bool:
+        """Vrai si le writer asyncio est actif et non en cours de fermeture."""
+        return self._writer is not None and not self._writer.is_closing()
+
+    async def open_with_retry(self, max_attempts: int = 8,
+                               initial_delay: float = 3.0) -> bool:
+        """
+        Tente d'ouvrir le port avec backoff exponentiel.
+        Séquence de délais : 3s → 5.4s → 9.7s → 17.5s → … → max 45s.
+        Retourne True si l'ouverture réussit, False si tous les essais échouent.
+        """
         import serial_asyncio
-        self._reader, self._writer = await serial_asyncio.open_serial_connection(
-            url=self.port,
-            baudrate=self.baudrate,
-        )
-        log.info(f"Port ouvert : {self.port} @ {self.baudrate} baud")
+        from serial import SerialException
+        delay = initial_delay
+        for attempt in range(1, max_attempts + 1):
+            try:
+                # Ferme proprement si un writer résiduel existe
+                if self._writer and not self._writer.is_closing():
+                    self._writer.close()
+                    try:
+                        await self._writer.wait_closed()
+                    except Exception:
+                        pass
+                self._reader, self._writer = await serial_asyncio.open_serial_connection(
+                    url=self.port,
+                    baudrate=self.baudrate,
+                )
+                # Vide les éventuels octets résiduels dans le buffer kernel
+                await self.flush()
+                log.info(f"Port ouvert : {self.port} @ {self.baudrate} baud (essai {attempt}/{max_attempts})")
+                return True
+            except (SerialException, OSError) as exc:
+                log.warning(f"Échec ouverture {self.port} (essai {attempt}/{max_attempts}) : {exc}")
+                if attempt < max_attempts:
+                    log.info(f"Nouvelle tentative dans {delay:.1f}s…")
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 1.8, 45.0)
+        log.error(f"Impossible d'ouvrir {self.port} après {max_attempts} essais — abandon")
+        self._reader = None
+        self._writer = None
+        return False
+
+    async def open(self):
+        """Ouvre le port avec retry automatique. Lève RuntimeError si tous les essais échouent."""
+        if not await self.open_with_retry():
+            raise RuntimeError(f"Impossible d'ouvrir le port UART : {self.port}")
 
     async def close(self):
         if self._writer:
@@ -608,6 +648,8 @@ class DalyBusManager:
         self.sensor_count = sensor_count
         self._port: Optional[DalyPort] = None
         self._bms: dict[int, DalyBms]  = {}
+        self._consecutive_errors: int   = 0
+        self._last_successful_open: float = 0.0
 
     async def open(self):
         self._port = DalyPort(self.port_path, self.baudrate)
@@ -619,6 +661,32 @@ class DalyBusManager:
     async def close(self):
         if self._port:
             await self._port.close()
+
+    async def _reopen(self) -> bool:
+        """
+        Ferme le port proprement et tente de le rouvrir avec retry.
+        Recrée les instances DalyBms qui tiennent une référence au DalyPort.
+        Appelé uniquement depuis poll_loop, hors du contexte du verrou UART.
+        """
+        log.warning(f"Reconnexion UART en cours sur {self.port_path}…")
+        # Fermeture propre (silencieuse si déjà fermé)
+        if self._port:
+            try:
+                await self._port.close()
+            except Exception:
+                pass
+        # Recrée un DalyPort vierge et tente l'ouverture avec retry
+        self._port = DalyPort(self.port_path, self.baudrate)
+        success = await self._port.open_with_retry()
+        if success:
+            # Recrée les instances DalyBms (elles pointent sur le nouveau DalyPort)
+            self._bms = {bid: DalyBms(self._port, bid) for bid in self.bms_ids}
+            self._consecutive_errors = 0
+            self._last_successful_open = time.monotonic()
+            log.info(f"Reconnexion réussie sur {self.port_path} — {len(self._bms)} BMS prêts")
+        else:
+            log.error(f"Reconnexion échouée sur {self.port_path}")
+        return success
 
     async def __aenter__(self):
         await self.open()
@@ -642,21 +710,67 @@ class DalyBusManager:
 
     async def poll_loop(self, callback, interval: float = 1.0):
         """
-        Boucle de polling infinie — appelle callback(dict[int, BmsSnapshot]) à chaque cycle.
-        Conception : callback peut être une coroutine ou une fonction sync.
+        Boucle de polling infinie avec reconnexion automatique.
+
+        Comportement en cas d'erreur UART :
+          - ferme le port immédiatement
+          - attend un délai croissant : 3s × 1.5^N, plafonné à 60s
+          - tente une reconnexion complète (open_with_retry)
+          - après 5 erreurs consécutives sans succès : reset du compteur + log ERROR
+
+        Callback : coroutine ou fonction sync appelée avec dict[int, BmsSnapshot].
         """
+        from serial import SerialException
+
         log.info(f"Démarrage polling — intervalle {interval}s")
         while True:
             t0 = time.monotonic()
+
+            # ── Vérification état du port ───────────────────────────────────
+            if not (self._port and self._port.is_open):
+                log.warning("Port UART fermé ou absent — tentative de reconnexion")
+                if not await self._reopen():
+                    await asyncio.sleep(15.0)
+                    continue
+
+            # ── Cycle de polling ────────────────────────────────────────────
             try:
                 snapshots = await self.snapshot_all()
                 if asyncio.iscoroutinefunction(callback):
                     await callback(snapshots)
                 else:
                     callback(snapshots)
-            except Exception as exc:
-                log.error(f"Erreur cycle polling : {exc}", exc_info=True)
+                self._consecutive_errors = 0
 
+            except (SerialException, OSError,
+                    asyncio.TimeoutError, asyncio.IncompleteReadError) as exc:
+                self._consecutive_errors += 1
+                log.warning(
+                    f"Erreur UART #{self._consecutive_errors} sur {self.port_path} : {exc}"
+                )
+                # Fermeture propre avant retry
+                if self._port:
+                    try:
+                        await self._port.close()
+                    except Exception:
+                        pass
+                # Backoff exponentiel
+                wait = min(3.0 * (1.5 ** self._consecutive_errors), 60.0)
+                log.info(f"Attente {wait:.1f}s avant nouvelle tentative…")
+                if self._consecutive_errors >= 5:
+                    log.error(
+                        f"5 erreurs consécutives sur {self.port_path} — "
+                        f"reset du compteur, reconnexion forcée"
+                    )
+                    self._consecutive_errors = 0
+                await asyncio.sleep(wait)
+                continue     # repart au début de la boucle → vérification is_open → _reopen
+
+            except Exception as exc:
+                log.exception(f"Erreur inattendue dans poll_loop : {exc}")
+                await asyncio.sleep(10.0)
+
+            # ── Respect de l'intervalle cible ───────────────────────────────
             elapsed = time.monotonic() - t0
             sleep_for = max(0.0, interval - elapsed)
             await asyncio.sleep(sleep_for)
