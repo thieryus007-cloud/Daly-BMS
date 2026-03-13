@@ -237,7 +237,7 @@ def _parse_mos_status(bms_id: int, raw: bytes) -> MosStatus:
     mode         = d[0]
     charge_mos   = bool(d[1])
     discharge_mos = bool(d[2])
-    cycles       = struct.unpack(">H", d[3:5])[0]
+    cycles       = d[3]                                      # heartbeat byte (0-255)
     remain_cap   = struct.unpack(">I", d[4:8])[0] / 1000.0  # mAh → Ah
     return MosStatus(
         bms_id=bms_id,
