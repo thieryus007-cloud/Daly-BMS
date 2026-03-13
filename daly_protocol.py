@@ -115,27 +115,31 @@ class BalanceStatus:
 class FailureFlags:
     bms_id: int
     timestamp: float
-    # Byte 0
-    cell_ovp: bool              # Over Voltage Protection cellule
-    cell_uvp: bool              # Under Voltage Protection cellule
-    pack_ovp: bool              # Sur-tension pack
-    pack_uvp: bool              # Sous-tension pack
-    chg_otp: bool               # Sur-température charge
-    chg_utp: bool               # Sous-température charge
-    dsg_otp: bool               # Sur-température décharge
-    dsg_utp: bool               # Sous-température décharge
-    # Byte 1
-    chg_ocp: bool               # Sur-courant charge
-    dsg_ocp: bool               # Sur-courant décharge
-    scp: bool                   # Court-circuit
-    cell_v_diff: bool           # Différentiel tension trop élevé
-    bat_err: bool               # Erreur interne batterie
-    slave_comm: bool            # Perte communication slave
-    soc_err: bool               # SOC hors plage
-    sensor_err: bool            # Sonde NTC défaillante
-    # Byte 2
-    cell_v_diff_2: bool         # Différentiel secondaire
-    dtu_fault: bool             # Erreur DTU
+    # Byte 0 — alarmes tension (bits 0-1=OVP cellule L1/L2, 2-3=UVP cellule, 4-5=OVP pack, 6-7=UVP pack)
+    cell_ovp: bool              # Sur-tension cellule (L1 ou L2)
+    cell_uvp: bool              # Sous-tension cellule (L1 ou L2)
+    pack_ovp: bool              # Sur-tension pack (L1 ou L2)
+    pack_uvp: bool              # Sous-tension pack (L1 ou L2)
+    # Byte 1 — alarmes température (bits 0-1=OTP chg L1/L2, 2-3=UTP chg, 4-5=OTP dsg, 6-7=UTP dsg)
+    chg_otp: bool               # Sur-température charge (L1 ou L2)
+    chg_utp: bool               # Sous-température charge (L1 ou L2)
+    dsg_otp: bool               # Sur-température décharge (L1 ou L2)
+    dsg_utp: bool               # Sous-température décharge (L1 ou L2)
+    # Byte 2 — alarmes courant/SOC (bits 0-1=OCP chg, 2-3=OCP dsg, 4-7=SOC)
+    chg_ocp: bool               # Sur-courant charge (L1 ou L2)
+    dsg_ocp: bool               # Sur-courant décharge (L1 ou L2)
+    soc_err: bool               # SOC hors plage (trop haut ou trop bas)
+    # Byte 3 — différentiels (bits 0-1=diff tension cellules, 2-3=diff sonde temp)
+    cell_v_diff: bool           # Différentiel tension cellules trop élevé
+    cell_v_diff_2: bool         # Différentiel sonde température trop élevé
+    # Byte 4 — défauts FET (sur-température + adhérence + disjoncteur)
+    bat_err: bool               # Défaut FET (sur-temp, adhérence ou disjoncteur)
+    # Byte 5 — défauts modules (AFE, capteurs, EEPROM, RTC, communication)
+    sensor_err: bool            # Défaut module capteur température
+    slave_comm: bool            # Défaut communication interne (véhicule/intranet)
+    dtu_fault: bool             # Défaut communication véhicule
+    # Byte 6 — défauts protection (court-circuit, capteur courant, basse tension)
+    scp: bool                   # Défaut module protection court-circuit
     # Résumé
     any_alarm: bool
 
@@ -300,38 +304,58 @@ def _parse_temperatures(bms_id: int, frames: list[bytes]) -> Temperatures:
 def _parse_balance_status(bms_id: int, raw: bytes) -> BalanceStatus:
     """
     6 octets de flags, bit i = cellule i en balancing.
-    Supporte jusqu'à 48 cellules, on extrait les 16 premiers bits pour 16S.
+    Bit 0 de l'octet 0 = cellule 1, bit 1 = cellule 2, …, bit 7 = cellule 8, etc.
+    Supporte jusqu'à 48 cellules (protocole Daly standard).
     """
     d = raw[4:10]
-    bits = int.from_bytes(d, "big")
-    balancing = [(bits >> i) & 1 == 1 for i in range(47, -1, -1)]
+    # little-endian pour préserver l'ordre : cellule 1 = d[0] bit 0
+    bits = int.from_bytes(d, "little")
+    balancing = [(bits >> i) & 1 == 1 for i in range(48)]
     return BalanceStatus(bms_id=bms_id, timestamp=time.time(), balancing=balancing)
 
 def _parse_failure_flags(bms_id: int, raw: bytes) -> FailureFlags:
     d = raw[4:12]
-    b0, b1, b2 = d[0], d[1], d[2]
+    # Byte 0 : alarmes tension (cellule + pack)
+    b0 = d[0]
+    # Byte 1 : alarmes température (charge + décharge)
+    b1 = d[1]
+    # Byte 2 : alarmes courant (OCP charge/décharge) + SOC
+    b2 = d[2]
+    # Byte 3 : différentiel tension/température
+    b3 = d[3]
+    # Bytes 4-6 : défauts modules (FET, communication, protection)
+    b4, b5, b6 = d[4], d[5], d[6]
     flags = FailureFlags(
         bms_id=bms_id,
         timestamp=time.time(),
-        cell_ovp      = bool(b0 & 0x01),
-        cell_uvp      = bool(b0 & 0x02),
-        pack_ovp      = bool(b0 & 0x04),
-        pack_uvp      = bool(b0 & 0x08),
-        chg_otp       = bool(b0 & 0x10),
-        chg_utp       = bool(b0 & 0x20),
-        dsg_otp       = bool(b0 & 0x40),
-        dsg_utp       = bool(b0 & 0x80),
-        chg_ocp       = bool(b1 & 0x01),
-        dsg_ocp       = bool(b1 & 0x02),
-        scp           = bool(b1 & 0x04),
-        cell_v_diff   = bool(b1 & 0x08),
-        bat_err       = bool(b1 & 0x10),
-        slave_comm    = bool(b1 & 0x20),
-        soc_err       = bool(b1 & 0x40),
-        sensor_err    = bool(b1 & 0x80),
-        cell_v_diff_2 = bool(b2 & 0x01),
-        dtu_fault     = bool(b2 & 0x02),
-        any_alarm     = (b0 | b1 | b2) != 0,
+        # b0 bits 0-1 : OVP cellule L1+L2 / bits 2-3 : UVP cellule L1+L2
+        # bits 4-5 : OVP pack L1+L2 / bits 6-7 : UVP pack L1+L2
+        cell_ovp      = bool(b0 & 0x03),
+        cell_uvp      = bool(b0 & 0x0C),
+        pack_ovp      = bool(b0 & 0x30),
+        pack_uvp      = bool(b0 & 0xC0),
+        # b1 bits 0-1 : OTP charge L1+L2 / bits 2-3 : UTP charge L1+L2
+        # bits 4-5 : OTP décharge L1+L2 / bits 6-7 : UTP décharge L1+L2
+        chg_otp       = bool(b1 & 0x03),
+        chg_utp       = bool(b1 & 0x0C),
+        dsg_otp       = bool(b1 & 0x30),
+        dsg_utp       = bool(b1 & 0xC0),
+        # b2 bits 0-1 : OCP charge L1+L2 / bits 2-3 : OCP décharge L1+L2
+        chg_ocp       = bool(b2 & 0x03),
+        dsg_ocp       = bool(b2 & 0x0C),
+        soc_err       = bool(b2 & 0xF0),   # bits 4-7 : SOC trop haut/bas L1+L2
+        # b3 : différentiel tension cellule (bits 0-1) + différentiel temp sonde (bits 2-3)
+        cell_v_diff   = bool(b3 & 0x03),
+        cell_v_diff_2 = bool(b3 & 0x0C),
+        # b4 : sur-température FET + défauts adhérence/disjoncteur FET
+        bat_err       = bool(b4),
+        # b5 : défauts modules (AFE, capteurs, EEPROM, RTC, précharge, communication)
+        slave_comm    = bool(b5 & 0xC0),   # bits 6-7 : comm véhicule + intranet
+        sensor_err    = bool(b5 & 0x04),   # bit 2 : module capteur température
+        # b6 bit 2 : défaut module protection court-circuit
+        scp           = bool(b6 & 0x04),
+        dtu_fault     = bool(b5 & 0x40),   # bit 6 : communication véhicule
+        any_alarm     = (b0 | b1 | b2 | b3 | b4 | b5 | b6) != 0,
     )
     return flags
 
