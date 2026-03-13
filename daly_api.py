@@ -35,9 +35,16 @@ log = logging.getLogger("daly.api")
 API_KEY          = os.getenv("DALY_API_KEY", "")           # vide = pas d'auth
 UART_PORT        = os.getenv("DALY_PORT", "/dev/ttyUSB1")
 POLL_INTERVAL    = float(os.getenv("DALY_POLL_INTERVAL", "1.0"))
-RING_BUFFER_SIZE = int(os.getenv("DALY_RING_SIZE", "3600"))  # 1h à 1s/point
-BMS_IDS          = [0x01, 0x02]
-CELL_COUNT       = int(os.getenv("DALY_CELL_COUNT", "16"))
+RING_BUFFER_SIZE    = int(os.getenv("DALY_RING_SIZE", "3600"))  # 1h à 1s/point
+CELL_COUNT          = int(os.getenv("DALY_CELL_COUNT", "16"))
+DALY_AUTO_DISCOVER  = os.getenv("DALY_AUTO_DISCOVER", "0") == "1"
+
+def _parse_bms_ids() -> list[int]:
+    """Parse DALY_ADDRESSES=0x01,0x02,0x03 en liste d'entiers triés."""
+    raw = os.getenv("DALY_ADDRESSES", "0x01,0x02")
+    return sorted({int(x.strip(), 0) for x in raw.split(",") if x.strip()})
+
+BMS_IDS = _parse_bms_ids()   # liste des adresses configurées (défaut : [1, 2])
 SENSOR_COUNT     = int(os.getenv("DALY_SENSOR_COUNT", "4"))
 
 # Bridges optionnels — activés via variables d'environnement
@@ -52,8 +59,7 @@ _API_PORT = int(os.getenv("API_PORT", "8000"))
 class AppState:
     manager: Optional[DalyWriteManager] = None
     snapshots: dict[int, dict]          = {}
-    ring: dict[int, deque]              = {0x01: deque(maxlen=RING_BUFFER_SIZE),
-                                           0x02: deque(maxlen=RING_BUFFER_SIZE)}
+    ring: dict[int, deque]              = {}      # initialisé dynamiquement dans lifespan
     ws_clients: set[WebSocket]          = set()
     poll_task: Optional[asyncio.Task]   = None
 
@@ -68,8 +74,25 @@ async def lifespan(app: FastAPI):
         format="%(asctime)s %(levelname)-8s %(name)s — %(message)s"
     )
     log.info("Démarrage DalyBMS API — connexion UART...")
+
+    # ── Découverte automatique des BMS (optionnel) ─────────────────────────────
+    active_ids = BMS_IDS
+    if DALY_AUTO_DISCOVER:
+        log.info("Auto-découverte activée — sonde du bus RS485…")
+        from daly_protocol import DalyBusManager as _BM
+        discovered = await _BM.discover(UART_PORT)
+        if discovered:
+            active_ids = discovered
+            log.info(f"Auto-découverte : {len(active_ids)} BMS → {[hex(x) for x in active_ids]}")
+        else:
+            log.warning("Auto-découverte : aucun BMS trouvé, utilisation de DALY_ADDRESSES")
+
+    # ── Initialisation ring buffers (un par BMS actif) ─────────────────────────
+    for bid in active_ids:
+        state.ring[bid] = deque(maxlen=RING_BUFFER_SIZE)
+
     state.manager = DalyWriteManager(
-        UART_PORT, BMS_IDS, cell_count=CELL_COUNT, sensor_count=SENSOR_COUNT
+        UART_PORT, active_ids, cell_count=CELL_COUNT, sensor_count=SENSOR_COUNT
     )
     await state.manager.__aenter__()
 
@@ -114,6 +137,9 @@ async def lifespan(app: FastAPI):
         for bid, snap in snaps.items():
             d = snapshot_to_dict(snap)
             state.snapshots[bid] = d
+            # Crée le ring buffer à la volée si un nouveau BMS répond
+            if bid not in state.ring:
+                state.ring[bid] = deque(maxlen=RING_BUFFER_SIZE)
             state.ring[bid].append(d)
         # Broadcast WebSocket
         if state.ws_clients:
@@ -177,10 +203,14 @@ async def check_api_key(x_api_key: Optional[str] = None):
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 def _resolve_bms_id(bms_id: int) -> int:
-    """Convertit l'ID URL (1 ou 2) en adresse Daly (0x01 ou 0x02)."""
-    if bms_id not in (1, 2):
-        raise HTTPException(status_code=404, detail=f"BMS ID invalide : {bms_id} (valeurs : 1, 2)")
-    return bms_id  # identiques ici (0x01 == 1, 0x02 == 2)
+    """Valide l'ID BMS de l'URL (0x01..0xFF) contre la liste des BMS actifs."""
+    active = state.manager.bms_ids if state.manager else BMS_IDS
+    if bms_id not in active:
+        raise HTTPException(
+            status_code=404,
+            detail=f"BMS {bms_id} non configuré — actifs : {active}",
+        )
+    return bms_id
 
 def _get_snapshot(bms_id: int) -> dict:
     snap = state.snapshots.get(bms_id)
@@ -277,7 +307,7 @@ class FullConfig(BaseModel):
 
 @app.get("/api/v1/system/status", tags=["Système"])
 async def system_status():
-    """État global du système — connectivité des deux BMS, état du polling."""
+    """État global du système — connectivité de tous les BMS actifs, état du polling."""
     return {
         "poll_running": state.poll_task is not None and not state.poll_task.done(),
         "poll_interval_s": POLL_INTERVAL,
@@ -292,6 +322,48 @@ async def system_status():
         },
         "ws_clients": len(state.ws_clients),
         "ring_buffer_size": RING_BUFFER_SIZE,
+    }
+
+
+@app.get("/api/v1/config", tags=["Système"])
+async def get_config():
+    """
+    Configuration active — liste des BMS et leurs noms.
+    Utilisé par le dashboard pour construire dynamiquement ses vues.
+    """
+    active = state.manager.bms_ids if state.manager else BMS_IDS
+    names  = {bid: os.getenv(f"BMS{bid}_NAME", f"BMS {bid}") for bid in active}
+    return {
+        "bms_ids":      active,
+        "bms_names":    names,
+        "cell_count":   CELL_COUNT,
+        "sensor_count": SENSOR_COUNT,
+    }
+
+
+@app.get("/api/v1/discover", tags=["Système"])
+async def discover_bms(
+    range_start: int = Query(1,   ge=1, le=255, description="Adresse de début (défaut 1)"),
+    range_end:   int = Query(8,   ge=1, le=255, description="Adresse de fin incluse (défaut 8)"),
+    _=Depends(check_api_key),
+):
+    """
+    Lance une découverte live des BMS sur le bus RS485.
+    Sonde chaque adresse de range_start à range_end et retourne celles qui répondent.
+    Durée typique : ~200ms × (range_end - range_start + 1).
+    """
+    if range_start > range_end:
+        raise HTTPException(status_code=400, detail="range_start doit être ≤ range_end")
+    from daly_protocol import DalyBusManager
+    t0    = time.monotonic()
+    found = await DalyBusManager.discover(
+        UART_PORT, probe_range=range(range_start, range_end + 1)
+    )
+    return {
+        "found":       found,
+        "count":       len(found),
+        "duration_ms": round((time.monotonic() - t0) * 1000),
+        "range":       f"0x{range_start:02X}–0x{range_end:02X}",
     }
 
 
@@ -453,7 +525,7 @@ async def bms_history_summary(bms_id: int, _=Depends(check_api_key)):
 
 @app.get("/api/v1/bms/compare", tags=["Monitoring"])
 async def bms_compare(_=Depends(check_api_key)):
-    """Vue comparative des deux BMS — métriques clés côte à côte."""
+    """Vue comparative de tous les BMS actifs — métriques clés côte à côte."""
     result = {}
     for bid in BMS_IDS:
         snap = state.snapshots.get(bid)

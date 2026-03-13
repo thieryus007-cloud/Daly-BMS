@@ -4,14 +4,19 @@ Interface complète de monitoring et contrôle pour batteries LiFePO4 Daly Smart
 Conçue pour le Raspberry Pi CM5, installation solaire Santuario (Badalucco, Ligurie).
 
 ```
-Pack 320Ah (BMS 0x01) ──┐
-                         ├── RS485/USB ── RPi CM5 ── FastAPI ── Dashboard React
-Pack 360Ah (BMS 0x02) ──┘                              │
-                                                        ├── MQTT (Mosquitto)
-                                                        ├── InfluxDB + Grafana
-                                                        ├── Alertes (Telegram/Email)
-                                                        └── Venus OS Bridge
+Pack A (BMS 0x01) ──┐
+Pack B (BMS 0x02) ──┤
+Pack C (BMS 0x03) ──┼── RS485/USB ── RPi CM5 ── FastAPI ── Dashboard React
+Pack D (BMS 0x04) ──┘                              │
+  (jusqu'à 32)                                     ├── MQTT (Mosquitto)
+                                                   ├── InfluxDB + Grafana
+                                                   ├── Alertes (Telegram/Email)
+                                                   └── Venus OS Bridge
 ```
+
+> **RS485** supporte jusqu'à 32 BMS par segment (standard TIA-485) et 255 adresses selon
+> le protocole Daly. En pratique, 4 BMS sur un seul adaptateur USB/RS485 fonctionne
+> parfaitement à 9600 baud.
 
 ---
 
@@ -26,6 +31,7 @@ Pack 360Ah (BMS 0x02) ──┘                              │
 - [API REST](#api-rest)
 - [Alertes](#alertes)
 - [Développement local](#développement-local)
+- [Ajouter un BMS / Découverte automatique](#ajouter-un-bms--découverte-automatique)
 - [Dépannage](#dépannage)
 
 ---
@@ -441,6 +447,84 @@ sudo ./install.sh update
 ```
 
 Le mode `update` : copie les sources, rebuild le dashboard React, redémarre `dalybms-api`.
+
+---
+
+## Ajouter un BMS / Découverte automatique
+
+### Limites RS485
+
+| Couche | Limite |
+|--------|--------|
+| Physique RS485 (standard TIA-485) | 32 unités par segment |
+| RS485 avec transceivers 1/8-load | jusqu'à 256 unités |
+| Protocole Daly (1 octet adresse) | 255 adresses (0x01..0xFF) |
+| **Recommandé** | 4 BMS sur un USB/RS485 |
+
+### Méthode 1 — Configuration manuelle (recommandée en production)
+
+Éditer `.env` :
+```bash
+# 3 BMS :
+DALY_ADDRESSES=0x01,0x02,0x03
+BMS3_NAME=Pack XXXAh
+MQTT_BMS3_NAME=pack_xxx
+INFLUX_BMS3_NAME=pack_xxx
+ALERT_BMS3_NAME=Pack XXXAh
+```
+
+Redémarrer le service :
+```bash
+sudo systemctl restart dalybms-api
+```
+
+### Méthode 2 — Découverte automatique (utile pour diagnostiquer)
+
+Activer ponctuellement la découverte au démarrage :
+```bash
+# Dans .env :
+DALY_AUTO_DISCOVER=1   # sonde 0x01..0x08 au démarrage
+
+sudo systemctl restart dalybms-api
+# Les logs indiquent les adresses trouvées :
+journalctl -u dalybms-api -f | grep "BMS détecté"
+```
+
+Une fois les adresses confirmées, repasser en mode manuel :
+```bash
+DALY_AUTO_DISCOVER=0
+DALY_ADDRESSES=0x01,0x02,0x03   # liste des adresses trouvées
+```
+
+### Méthode 3 — Endpoint `/api/v1/discover` (sans redémarrer)
+
+```bash
+# Sonde les adresses 1 à 8 (défaut) :
+curl http://localhost:8000/api/v1/discover
+
+# Sonde une plage étendue :
+curl "http://localhost:8000/api/v1/discover?range_start=1&range_end=16"
+```
+
+Réponse exemple :
+```json
+{
+  "found": [1, 2, 3],
+  "count": 3,
+  "duration_ms": 1847,
+  "range": "0x01–0x08"
+}
+```
+
+### Vérification post-ajout
+
+```bash
+# Vérifier que le nouveau BMS est bien polléé :
+curl http://localhost:8000/api/v1/system/status | python3 -m json.tool
+
+# Voir les snapshots en temps réel :
+curl http://localhost:8000/api/v1/bms/3/status
+```
 
 ---
 

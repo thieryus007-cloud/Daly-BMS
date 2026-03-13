@@ -469,13 +469,14 @@ class DalyPort:
 # ─── Couche commandes ─────────────────────────────────────────────────────────
 class DalyBms:
     """
-    Interface de haut niveau pour un BMS Daly identifié par son bms_id (0x01 ou 0x02).
+    Interface de haut niveau pour un BMS Daly identifié par son adresse (0x01 à 0xFF).
     Partage un DalyPort avec d'autres instances pour le multi-BMS sur même bus UART.
+    Compatible RS485 : jusqu'à 32 unités par segment (standard), 255 adresses (protocole).
     """
     def __init__(self, port: DalyPort, bms_id: int,
                  retries: int = DEFAULT_RETRIES, timeout: float = DEFAULT_TIMEOUT):
-        if bms_id not in (0x01, 0x02):
-            raise ValueError(f"bms_id doit être 0x01 ou 0x02, reçu : {bms_id:#04x}")
+        if not (0x01 <= bms_id <= 0xFF):
+            raise ValueError(f"bms_id doit être entre 0x01 et 0xFF, reçu : {bms_id:#04x}")
         self.port    = port
         self.bms_id  = bms_id
         self.retries = retries
@@ -637,7 +638,12 @@ class DalyBms:
 class DalyBusManager:
     """
     Gestionnaire du bus UART partagé entre plusieurs BMS Daly.
-    Usage typique : BMS 0x01 (320Ah) + BMS 0x02 (360Ah) sur même adaptateur USB/RS485.
+
+    Supporte de 1 à 255 BMS sur un même bus RS485 (limité en pratique à 32 par le
+    standard TIA-485). Les adresses BMS vont de 0x01 à 0xFF.
+
+    Usage typique : plusieurs packs LiFePO4 sur un seul adaptateur USB/RS485.
+    Utiliser discover() pour détecter automatiquement les BMS présents sur le bus.
     """
     def __init__(self, port_path: str, bms_ids: list[int] = None,
                  baudrate: int = 9600, cell_count: int = 16, sensor_count: int = 4):
@@ -687,6 +693,58 @@ class DalyBusManager:
         else:
             log.error(f"Reconnexion échouée sur {self.port_path}")
         return success
+
+    @classmethod
+    async def discover(cls, port_path: str, baudrate: int = 9600,
+                       probe_range: range = range(1, 9),
+                       timeout: float = 0.3) -> list[int]:
+        """
+        Sonde le bus RS485 et retourne la liste des adresses BMS répondantes.
+
+        Envoie une requête SOC (0x90) à chaque adresse de probe_range.
+        Les adresses qui répondent avec une trame valide sont retournées.
+        Le port est ouvert puis fermé proprement après la découverte.
+
+        Args:
+            port_path   : chemin du port série (ex: /dev/ttyUSB0)
+            baudrate    : débit UART (défaut 9600)
+            probe_range : plage d'adresses à sonder (défaut 0x01..0x08)
+            timeout     : timeout par sonde en secondes (défaut 0.3s)
+
+        Returns:
+            Liste d'entiers (adresses BMS trouvées), triée par ordre croissant.
+        """
+        from serial import SerialException
+        port = DalyPort(port_path, baudrate, timeout=timeout)
+        found: list[int] = []
+        log.info(
+            f"Découverte BMS sur {port_path} — "
+            f"sonde 0x{min(probe_range):02X}..0x{max(probe_range):02X}"
+        )
+        try:
+            if not await port.open_with_retry(max_attempts=3, initial_delay=2.0):
+                log.error(f"Découverte impossible : port {port_path} inaccessible")
+                return found
+            for bms_id in probe_range:
+                try:
+                    async with port._lock:
+                        await port.flush()
+                        frame = _build_request(bms_id, Cmd.SOC_DATA)
+                        await port.send_frame(frame)
+                        resp = await port.receive_frame(RESP_HEADER_LEN + 8 + 1)
+                    if resp and _validate_response(resp, Cmd.SOC_DATA, bms_id):
+                        log.info(f"  ✓ BMS détecté à l'adresse 0x{bms_id:02X}")
+                        found.append(bms_id)
+                    else:
+                        log.debug(f"  — Pas de réponse à 0x{bms_id:02X}")
+                    await asyncio.sleep(0.15)
+                except (SerialException, OSError, asyncio.TimeoutError) as exc:
+                    log.warning(f"  ! Erreur sonde 0x{bms_id:02X} : {exc}")
+        finally:
+            await port.close()
+        addrs = [f"0x{x:02X}" for x in found]
+        log.info(f"Découverte terminée : {len(found)} BMS trouvé(s) → {addrs}")
+        return found
 
     async def __aenter__(self):
         await self.open()

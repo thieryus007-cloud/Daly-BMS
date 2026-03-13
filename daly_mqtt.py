@@ -38,11 +38,14 @@ BRIDGE_HOST      = os.getenv("MQTT_BRIDGE_HOST",  "192.168.1.120")  # IP NanoPi
 BRIDGE_PORT      = int(os.getenv("MQTT_BRIDGE_PORT", "1883"))
 BRIDGE_PREFIX    = os.getenv("MQTT_BRIDGE_PREFIX", "santuario/bms")
 
-# Noms des BMS pour les topics
-BMS_NAMES = {
-    0x01: os.getenv("MQTT_BMS1_NAME", "pack_320ah"),
-    0x02: os.getenv("MQTT_BMS2_NAME", "pack_360ah"),
-}
+# Noms des BMS pour les topics — dynamique selon DALY_ADDRESSES
+def _load_bms_names() -> dict[int, str]:
+    """Construit le dict {bms_id: nom} depuis DALY_ADDRESSES + MQTT_BMS{N}_NAME."""
+    raw = os.getenv("DALY_ADDRESSES", "0x01,0x02")
+    ids = sorted({int(x.strip(), 0) for x in raw.split(",") if x.strip()})
+    return {bid: os.getenv(f"MQTT_BMS{bid}_NAME", f"bms{bid:02d}") for bid in ids}
+
+BMS_NAMES = _load_bms_names()
 
 
 # ─── Structure de topic ───────────────────────────────────────────────────────
