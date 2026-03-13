@@ -1,7 +1,7 @@
 # DalyBMS Interface — Santuario
 
 Interface complète de monitoring et contrôle pour batteries LiFePO4 Daly Smart BMS.
-Conçue pour le Raspberry Pi CM5, installation solaire Santuario (Badalucco, Ligurie).
+Conçue pour le Raspberry Pi CM5, installation solaire Santuario.
 
 ```
 Pack A (BMS 0x01) ──┐
