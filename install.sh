@@ -52,6 +52,20 @@ check_python() {
     fi
 }
 
+check_node() {
+    if command -v node &>/dev/null; then
+        log_info "Node.js : $(node --version) / npm : $(npm --version)"
+        return
+    fi
+    log_info "Installation Node.js LTS..."
+    if ! command -v curl &>/dev/null; then
+        apt-get install -y curl
+    fi
+    curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - >/dev/null 2>&1
+    apt-get install -y nodejs >/dev/null 2>&1
+    log_ok "Node.js installé : $(node --version)"
+}
+
 check_uart() {
     log_info "Vérification port UART…"
     UART_PORT="${DALY_PORT:-/dev/ttyUSB1}"
@@ -293,6 +307,11 @@ API_WORKERS=1
 # Laisser vide pour désactiver l'auth
 API_KEY=
 
+# ── Bridges intégrés dans dalybms-api ────────────────────────────────────────
+# Mettre à 1 pour activer MQTT dans le processus API (évite dalybms-mqtt.service)
+MQTT_ENABLED=0
+# InfluxDB activé automatiquement si INFLUX_TOKEN est renseigné
+
 # ── Alertes ───────────────────────────────────────────────────────────────────
 ALERT_DB_PATH=/data/dalybms/alerts.db
 ALERT_CHECK_INTERVAL=1.0
@@ -330,6 +349,45 @@ EOF
     chmod 600 "$ENV_FILE"
     log_ok ".env créé : $ENV_FILE"
     log_warn "Éditer $ENV_FILE avant de démarrer les services"
+}
+
+# ─── Étape 6b : Build dashboard React ────────────────────────────────────────
+build_dashboard() {
+    log_step "Build dashboard React"
+    DASHBOARD_DIR="$SCRIPT_DIR/dashboard"
+    FRONTEND_DIR="$INSTALL_DIR/frontend"
+
+    if [[ ! -d "$DASHBOARD_DIR" ]]; then
+        log_warn "Répertoire dashboard/ introuvable — ignoré"
+        return
+    fi
+
+    check_node
+
+    log_info "npm install…"
+    (cd "$DASHBOARD_DIR" && npm install --prefer-offline 2>&1 | tail -3)
+
+    log_info "npm run build…"
+    (cd "$DASHBOARD_DIR" && npm run build 2>&1 | tail -5)
+
+    # Le vite.config.js place le dist dans $SCRIPT_DIR/dist (outDir: '../dist')
+    DIST_SRC="$SCRIPT_DIR/dist"
+    if [[ ! -d "$DIST_SRC" ]]; then
+        # Fallback : dist dans dashboard/dist
+        DIST_SRC="$DASHBOARD_DIR/dist"
+    fi
+
+    if [[ ! -d "$DIST_SRC" ]]; then
+        log_warn "Build dashboard introuvable — dashboard non déployé"
+        return
+    fi
+
+    mkdir -p "$FRONTEND_DIR"
+    rm -rf "$FRONTEND_DIR/dist"
+    cp -r "$DIST_SRC" "$FRONTEND_DIR/dist"
+    chown -R "$USER:$GROUP" "$FRONTEND_DIR"
+    chmod -R 755 "$FRONTEND_DIR/dist"
+    log_ok "Dashboard déployé : $FRONTEND_DIR/dist"
 }
 
 # ─── Étape 7 : Services systemd ───────────────────────────────────────────────
@@ -715,17 +773,19 @@ configure_influxdb() {
 # ─── Étape 12 : Activation services ──────────────────────────────────────────
 enable_services() {
     log_step "Activation services systemd"
-    SERVICES=(
-        dalybms-api
-        dalybms-mqtt
-        dalybms-influx
-        dalybms-alerts
-        dalybms-venus
-    )
-    for svc in "${SERVICES[@]}"; do
-        systemctl enable "$svc"
-        log_info "  Activé : $svc"
-    done
+
+    # Services core — démarrent automatiquement
+    systemctl enable dalybms-api
+    systemctl enable dalybms-venus
+    log_info "  Activé : dalybms-api (inclut AlertBridge + bridges MQTT/Influx si configurés)"
+    log_info "  Activé : dalybms-venus"
+
+    # Services standalone (désactivés par défaut — bridges intégrés dans dalybms-api)
+    # Activer manuellement si déploiement multi-processus souhaité :
+    #   systemctl enable dalybms-mqtt dalybms-influx dalybms-alerts
+    log_info "  Note : dalybms-mqtt / dalybms-influx / dalybms-alerts sont désactivés"
+    log_info "         Les bridges sont intégrés dans dalybms-api (MQTT_ENABLED, INFLUX_TOKEN)"
+
     log_ok "Services activés (démarrage automatique au boot)"
     log_warn "Démarrage différé — configurer .env en premier"
 }
@@ -757,8 +817,10 @@ print_summary() {
     echo -e "     ${BOLD}journalctl -u dalybms-api -f${NC}"
     echo
     echo -e "  5. Interfaces :"
+    echo -e "     Dashboard : ${CYAN}http://dalybms.local/${NC}"
     echo -e "     API REST  : ${CYAN}http://dalybms.local/api/v1/system/status${NC}"
     echo -e "     Docs API  : ${CYAN}http://dalybms.local/docs${NC}"
+    echo -e "     Alertes   : ${CYAN}http://dalybms.local/api/v1/alerts/active${NC}"
     echo -e "     Grafana   : ${CYAN}http://dalybms.local/grafana/${NC}"
     echo -e "     InfluxDB  : ${CYAN}http://dalybms.local:8086${NC}"
     echo
@@ -813,6 +875,7 @@ main() {
             create_directories
             setup_venv
             install_sources
+            build_dashboard
             create_env_file
             install_systemd_services
             configure_mosquitto
@@ -829,8 +892,9 @@ main() {
         update)
             check_root
             install_sources
+            build_dashboard
             setup_venv
-            systemctl restart dalybms.target 2>/dev/null || true
+            systemctl restart dalybms-api 2>/dev/null || true
             log_ok "Mise à jour terminée"
             ;;
         status)

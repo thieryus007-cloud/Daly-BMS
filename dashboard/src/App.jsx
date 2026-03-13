@@ -19,7 +19,10 @@ const C = {
   textDim:    "#2a4a6a",
 };
 
-// ─── Mock data generator ──────────────────────────────────────────────────────
+// ─── Noms BMS ────────────────────────────────────────────────────────────────
+const BMS_NAMES = { 1: "Pack 320Ah", 2: "Pack 360Ah" };
+
+// ─── Mock data (état initial avant connexion WS) ──────────────────────────────
 function generateSnapshot(bmsId, t = Date.now()) {
   const base = bmsId === 1 ? 320 : 360;
   const soc  = 72 + Math.sin(t / 30000) * 8;
@@ -30,7 +33,7 @@ function generateSnapshot(bmsId, t = Date.now()) {
   });
   return {
     bms_id:         bmsId,
-    bms_name:       bmsId === 1 ? "Pack 320Ah" : "Pack 360Ah",
+    bms_name:       BMS_NAMES[bmsId],
     soc:            +soc.toFixed(1),
     pack_voltage:   +(cells.reduce((a, b) => a + b, 0) / 1000).toFixed(2),
     pack_current:   +(12 + Math.sin(t / 8000) * 5).toFixed(1),
@@ -49,7 +52,7 @@ function generateSnapshot(bmsId, t = Date.now()) {
     discharge_mos:  true,
     bms_cycles:     bmsId === 1 ? 147 : 89,
     remaining_capacity: +(base * soc / 100).toFixed(1),
-    balancing_mask: cells.map((v, i) => v === Math.max(...cells) ? 1 : 0),
+    balancing_mask: cells.map(v => v === Math.max(...cells) ? 1 : 0),
     any_alarm:      false,
     alarms: {
       cell_ovp: false, cell_uvp: false, pack_ovp: false,
@@ -60,36 +63,118 @@ function generateSnapshot(bmsId, t = Date.now()) {
   };
 }
 
+// ─── Normalisation snapshot API → format dashboard ────────────────────────────
+// L'API retourne un dict plat (cell_01…cell_16, temp_01…, alarm_*)
+// Le dashboard attend cell_voltages[], temperatures[], alarms{}
+function normalizeSnapshot(raw) {
+  const id = raw.bms_id;
+
+  const cell_voltages = Array.from({ length: 16 }, (_, i) =>
+    raw[`cell_${String(i + 1).padStart(2, "0")}`] ?? 0
+  );
+
+  const temperatures = Array.from({ length: 4 }, (_, i) =>
+    raw[`temp_${String(i + 1).padStart(2, "0")}`] ?? 0
+  ).filter(t => t !== 0);
+
+  // alarm_cell_ovp → alarms.cell_ovp
+  const alarms = {};
+  Object.entries(raw).forEach(([k, v]) => {
+    if (k.startsWith("alarm_") && k !== "any_alarm") alarms[k.slice(6)] = v;
+  });
+
+  return {
+    ...raw,
+    bms_name:     BMS_NAMES[id] || `BMS ${id}`,
+    cell_voltages,
+    temperatures,
+    alarms,
+  };
+}
+
 // ─── Hooks ────────────────────────────────────────────────────────────────────
+
+// WebSocket live — se connecte à /ws/bms/stream, fallback sur mock
 function useLiveData() {
   const [data, setData] = useState({
     1: generateSnapshot(1),
     2: generateSnapshot(2),
   });
-  const [connected, setConnected] = useState(true);
-  const histRef = useRef({ 1: [], 2: [] });
+  const [connected, setConnected] = useState(false);
+  const histRef   = useRef({ 1: [], 2: [] });
+  const wsRef     = useRef(null);
 
   useEffect(() => {
-    const iv = setInterval(() => {
-      const t = Date.now();
-      setData(prev => {
-        const next = {
-          1: generateSnapshot(1, t),
-          2: generateSnapshot(2, t),
-        };
-        // Ring buffer 180 points
-        [1, 2].forEach(id => {
-          histRef.current[id].push({ ...next[id], ts: t });
-          if (histRef.current[id].length > 180)
-            histRef.current[id].shift();
-        });
-        return next;
-      });
-    }, 1000);
-    return () => clearInterval(iv);
+    const proto  = window.location.protocol === "https:" ? "wss" : "ws";
+    const WS_URL = `${proto}://${window.location.host}/ws/bms/stream`;
+    let reconnectTimer = null;
+
+    function connect() {
+      const ws = new WebSocket(WS_URL);
+      wsRef.current = ws;
+
+      ws.onopen = () => setConnected(true);
+
+      ws.onmessage = evt => {
+        try {
+          const msg = JSON.parse(evt.data);
+          if (msg.type === "snapshot" && msg.data) {
+            const next = {};
+            Object.entries(msg.data).forEach(([k, v]) => {
+              next[+k] = normalizeSnapshot(v);
+            });
+            setData(next);
+            const ts = Date.now();
+            [1, 2].forEach(id => {
+              if (next[id]) {
+                histRef.current[id].push({ ...next[id], ts });
+                if (histRef.current[id].length > 180) histRef.current[id].shift();
+              }
+            });
+          }
+        } catch (_) { /* ignore parse errors */ }
+      };
+
+      ws.onerror = () => ws.close();
+
+      ws.onclose = () => {
+        setConnected(false);
+        wsRef.current = null;
+        reconnectTimer = setTimeout(connect, 3000);
+      };
+    }
+
+    connect();
+
+    return () => {
+      clearTimeout(reconnectTimer);
+      if (wsRef.current) {
+        wsRef.current.onclose = null;
+        wsRef.current.close();
+      }
+    };
   }, []);
 
   return { data, history: histRef.current, connected };
+}
+
+// Historique alertes — interroge /api/v1/alerts/history toutes les 10s
+function useAlertHistory() {
+  const [events, setEvents] = useState([]);
+
+  useEffect(() => {
+    const load = () =>
+      fetch("/api/v1/alerts/history?limit=20")
+        .then(r => r.ok ? r.json() : null)
+        .then(d => d && setEvents(d.events || []))
+        .catch(() => {});
+
+    load();
+    const iv = setInterval(load, 10000);
+    return () => clearInterval(iv);
+  }, []);
+
+  return events;
 }
 
 // ─── Composants UI de base ────────────────────────────────────────────────────
@@ -723,7 +808,11 @@ const ALARM_LABELS = {
   cell_delta: "Déséquilibre cellules",
 };
 
+const SEV_COLOR = { CRITICAL: C.red, WARNING: C.yellow, INFO: C.primary };
+
 function PageAlarms({ data }) {
+  const alertHistory = useAlertHistory();
+
   const allAlarms = Object.entries(data).flatMap(([id, d]) =>
     Object.entries(d.alarms || {}).map(([key, val]) => ({
       bms_id: +id, key, label: ALARM_LABELS[key] || key, active: val,
@@ -780,30 +869,41 @@ function PageAlarms({ data }) {
         ))}
       </div>
 
-      {/* Journal simulé */}
+      {/* Journal des événements — AlertBridge SQLite */}
       <Card style={{ marginTop: 12 }}>
-        <Label>Journal des événements (simulation)</Label>
+        <Label>Journal des événements — {alertHistory.length > 0 ? `${alertHistory.length} derniers` : "chargement…"}</Label>
         <div style={{ marginTop: 10 }}>
-          {[
-            { t: "14:23:11", bms: 1, evt: "cell_delta_high DÉCLENCHÉ", v: "93mV", sev: C.yellow },
-            { t: "14:23:08", bms: 1, evt: "cell_delta_high EFFACÉ",    v: "72mV", sev: C.green  },
-            { t: "13:45:02", bms: 2, evt: "cell_voltage_high EFFACÉ",  v: "3.598V", sev: C.green },
-            { t: "13:44:57", bms: 2, evt: "cell_voltage_high DÉCLENCHÉ", v: "3.612V", sev: C.red },
-          ].map((row, i) => (
-            <div key={i} style={{
-              display: "flex", gap: 16, padding: "8px 0",
-              borderBottom: `1px solid ${C.border}`,
-              alignItems: "center",
-            }}>
-              <span style={{ fontSize: 10, color: C.textMuted,
-                fontFamily: "'Space Mono', monospace", minWidth: 60 }}>{row.t}</span>
-              <Pill color={C.textMuted}>BMS {row.bms}</Pill>
-              <span style={{ fontSize: 11, color: row.sev, flex: 1,
-                fontFamily: "'Space Mono', monospace" }}>{row.evt}</span>
-              <span style={{ fontSize: 11, color: C.textMuted,
-                fontFamily: "'Space Mono', monospace" }}>{row.v}</span>
-            </div>
-          ))}
+          {alertHistory.length === 0 ? (
+            <span style={{ fontSize: 10, color: C.textMuted,
+              fontFamily: "'Space Mono', monospace" }}>
+              Aucun événement — AlertBridge démarré
+            </span>
+          ) : alertHistory.map((row, i) => {
+            const isTriggered = row.event === "triggered";
+            const sev = SEV_COLOR[row.severity] || C.primary;
+            const evtColor = isTriggered ? sev : C.green;
+            const ts = new Date(row.timestamp * 1000).toLocaleTimeString("fr-FR");
+            return (
+              <div key={i} style={{
+                display: "flex", gap: 12, padding: "8px 0",
+                borderBottom: `1px solid ${C.border}`,
+                alignItems: "center", flexWrap: "wrap",
+              }}>
+                <span style={{ fontSize: 10, color: C.textMuted,
+                  fontFamily: "'Space Mono', monospace", minWidth: 60 }}>{ts}</span>
+                <Pill color={C.textMuted}>BMS {row.bms_id}</Pill>
+                <Pill color={sev}>{row.severity}</Pill>
+                <span style={{ fontSize: 11, color: evtColor, flex: 1,
+                  fontFamily: "'Space Mono', monospace" }}>
+                  {row.rule_name} — {isTriggered ? "DÉCLENCHÉ" : "EFFACÉ"}
+                </span>
+                {row.value && (
+                  <span style={{ fontSize: 11, color: C.textMuted,
+                    fontFamily: "'Space Mono', monospace" }}>{row.value}</span>
+                )}
+              </div>
+            );
+          })}
         </div>
       </Card>
     </div>

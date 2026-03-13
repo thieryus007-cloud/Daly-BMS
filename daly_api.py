@@ -40,6 +40,10 @@ BMS_IDS          = [0x01, 0x02]
 CELL_COUNT       = int(os.getenv("DALY_CELL_COUNT", "16"))
 SENSOR_COUNT     = int(os.getenv("DALY_SENSOR_COUNT", "4"))
 
+# Bridges optionnels — activés via variables d'environnement
+MQTT_ENABLED   = os.getenv("MQTT_ENABLED",   "0") == "1"
+INFLUX_ENABLED = bool(os.getenv("INFLUX_TOKEN", ""))
+
 # ─── État global partagé ─────────────────────────────────────────────────────
 class AppState:
     manager: Optional[DalyWriteManager] = None
@@ -65,6 +69,43 @@ async def lifespan(app: FastAPI):
     )
     await state.manager.__aenter__()
 
+    # ── Bridges ────────────────────────────────────────────────────────────────
+    _bridges: list = []   # bridges avec interface on_snapshot / stop
+
+    # AlertBridge — toujours actif, enregistre aussi les routes /api/v1/alerts/*
+    try:
+        from daly_alerts import AlertBridge, register_alert_routes
+        _alert = AlertBridge()
+        _alert.start()
+        register_alert_routes(app, _alert)
+        _bridges.append(_alert)
+        log.info("AlertBridge démarré")
+    except Exception as exc:
+        log.warning(f"AlertBridge non démarré : {exc}")
+
+    # MqttBridge — si MQTT_ENABLED=1
+    if MQTT_ENABLED:
+        try:
+            from daly_mqtt import MqttBridge
+            _mqtt = MqttBridge()
+            _mqtt.start()
+            _bridges.append(_mqtt)
+            log.info("MqttBridge démarré")
+        except Exception as exc:
+            log.warning(f"MqttBridge non démarré : {exc}")
+
+    # InfluxBridge — si INFLUX_TOKEN configuré
+    if INFLUX_ENABLED:
+        try:
+            from daly_influx import InfluxBridge
+            _influx = InfluxBridge(cell_count=CELL_COUNT, sensor_count=SENSOR_COUNT)
+            await _influx.start()
+            _bridges.append(_influx)
+            log.info("InfluxBridge démarré")
+        except Exception as exc:
+            log.warning(f"InfluxBridge non démarré : {exc}")
+
+    # ── Polling ────────────────────────────────────────────────────────────────
     async def _on_snapshot(snaps: dict[int, BmsSnapshot]):
         for bid, snap in snaps.items():
             d = snapshot_to_dict(snap)
@@ -80,6 +121,9 @@ async def lifespan(app: FastAPI):
                 except Exception:
                     dead.add(ws)
             state.ws_clients -= dead
+        # Bridges
+        for bridge in _bridges:
+            await bridge.on_snapshot(snaps)
 
     state.poll_task = asyncio.create_task(
         state.manager.poll_loop(_on_snapshot, POLL_INTERVAL),
@@ -92,6 +136,8 @@ async def lifespan(app: FastAPI):
     log.info("Arrêt DalyBMS API...")
     if state.poll_task:
         state.poll_task.cancel()
+    for bridge in reversed(_bridges):
+        await bridge.stop()
     await state.manager.__aexit__(None, None, None)
 
 
