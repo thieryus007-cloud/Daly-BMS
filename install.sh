@@ -305,7 +305,7 @@ API_HOST=0.0.0.0
 API_PORT=8000
 API_WORKERS=1
 # Laisser vide pour désactiver l'auth
-API_KEY=
+DALY_API_KEY=
 
 # ── Bridges intégrés dans dalybms-api ────────────────────────────────────────
 # Mettre à 1 pour activer MQTT dans le processus API (évite dalybms-mqtt.service)

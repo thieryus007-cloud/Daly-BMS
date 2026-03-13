@@ -42,7 +42,11 @@ SENSOR_COUNT     = int(os.getenv("DALY_SENSOR_COUNT", "4"))
 
 # Bridges optionnels — activés via variables d'environnement
 MQTT_ENABLED   = os.getenv("MQTT_ENABLED",   "0") == "1"
-INFLUX_ENABLED = bool(os.getenv("INFLUX_TOKEN", ""))
+INFLUX_ENABLED = bool(os.getenv("INFLUX_TOKEN", "").strip())
+
+# Point d'entrée uvicorn (python -m daly_api)
+_API_HOST = os.getenv("API_HOST", "0.0.0.0")
+_API_PORT = int(os.getenv("API_PORT", "8000"))
 
 # ─── État global partagé ─────────────────────────────────────────────────────
 class AppState:
@@ -852,8 +856,8 @@ async def bms_export_csv(
 if __name__ == "__main__":
     uvicorn.run(
         "daly_api:app",
-        host="0.0.0.0",
-        port=8000,
+        host=_API_HOST,
+        port=_API_PORT,
         reload=False,
         log_level="info",
     )
