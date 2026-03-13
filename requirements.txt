@@ -1,0 +1,27 @@
+# ─────────────────────────────────────────────
+# Daly BMS Interface — Python dependencies
+# Cible : Python 3.11+  /  Raspberry Pi CM5
+# ─────────────────────────────────────────────
+
+# --- Protocole UART / RS485 ---
+pyserial>=3.5
+pyserial-asyncio>=0.6          # serial_asyncio (daly_protocol.py)
+
+# --- API REST + WebSocket ---
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0      # serveur ASGI avec websockets
+pydantic>=2.0.0                # validation des modèles API
+python-multipart>=0.0.9        # upload de fichiers (endpoints FastAPI)
+
+# --- MQTT ---
+aiomqtt>=2.0.0                 # client MQTT async (daly_mqtt.py, daly_venus.py)
+
+# --- InfluxDB 2.x ---
+influxdb-client[async]>=1.40.0 # écriture time-series (daly_influx.py)
+
+# --- Alertes : notifications ---
+aiosmtplib>=3.0.0              # envoi email async (daly_alerts.py)
+httpx>=0.27.0                  # appels Telegram Bot API (daly_alerts.py)
+
+# --- Utilitaires ---
+python-dotenv>=1.0.0           # chargement fichier .env
