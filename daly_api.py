@@ -331,13 +331,18 @@ async def get_config():
     Configuration active — liste des BMS et leurs noms.
     Utilisé par le dashboard pour construire dynamiquement ses vues.
     """
-    active = state.manager.bms_ids if state.manager else BMS_IDS
-    names  = {bid: os.getenv(f"BMS{bid}_NAME", f"BMS {bid}") for bid in active}
+    active   = state.manager.bms_ids if state.manager else BMS_IDS
+    names    = {bid: os.getenv(f"BMS{bid}_NAME", f"BMS {bid}") for bid in active}
+    capacity = {
+        bid: int(os.getenv(f"BMS{bid}_CAPACITY_AH", os.getenv("DALY_CAPACITY_AH", "320")))
+        for bid in active
+    }
     return {
         "bms_ids":      active,
         "bms_names":    names,
         "cell_count":   CELL_COUNT,
         "sensor_count": SENSOR_COUNT,
+        "capacity_ah":  capacity,
     }
 
 
