@@ -74,7 +74,7 @@ async def lifespan(app: FastAPI):
         if state.ws_clients:
             payload = json.dumps({"type": "snapshot", "data": state.snapshots})
             dead = set()
-            for ws in state.ws_clients:
+            for ws in set(state.ws_clients):   # copie pour éviter RuntimeError si modification concurrente
                 try:
                     await ws.send_text(payload)
                 except Exception:

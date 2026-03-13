@@ -318,6 +318,7 @@ class DalyInfluxWriter:
         self._writer: Optional[InfluxBatchWriter] = None
         self._prev_alarms: dict[int, dict]        = {}
         self._alarm_counters: dict[int, dict]     = {}
+        self._pending_tasks: set[asyncio.Task]    = set()
 
     async def __aenter__(self):
         self._client = InfluxDBClient(
@@ -333,6 +334,9 @@ class DalyInfluxWriter:
         return self
 
     async def __aexit__(self, *args):
+        # Attendre toutes les tasks _write_snapshot en vol avant de stopper le writer
+        if self._pending_tasks:
+            await asyncio.gather(*list(self._pending_tasks), return_exceptions=True)
         if self._writer:
             await self._writer.stop()
         if self._client:
@@ -343,8 +347,11 @@ class DalyInfluxWriter:
         """
         Traite un snapshot et l'écrit dans InfluxDB.
         Appelé depuis le poll_loop ou MqttBridge.
+        La task est trackée pour garantir son exécution avant l'arrêt du writer.
         """
-        asyncio.create_task(self._write_snapshot(bms_id, snap))
+        task = asyncio.create_task(self._write_snapshot(bms_id, snap))
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._pending_tasks.discard)
 
     async def _write_snapshot(self, bms_id: int, snap: dict):
         points = [
