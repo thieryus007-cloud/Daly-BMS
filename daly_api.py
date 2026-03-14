@@ -16,7 +16,7 @@ from typing import Any, Optional
 
 import uvicorn
 from fastapi import (
-    Depends, FastAPI, HTTPException, Query,
+    Depends, FastAPI, Header, HTTPException, Query,
     WebSocket, WebSocketDisconnect, status,
 )
 from fastapi.middleware.cors import CORSMiddleware
@@ -63,6 +63,7 @@ class AppState:
     ring: dict[int, deque]              = {}      # initialisé dynamiquement dans lifespan
     ws_clients: set[WebSocket]          = set()
     poll_task: Optional[asyncio.Task]   = None
+    active_ids: list[int]               = []      # BMS actifs (après auto-découverte)
 
 state = AppState()
 
@@ -89,6 +90,7 @@ async def lifespan(app: FastAPI):
             log.warning("Auto-découverte : aucun BMS trouvé, utilisation de DALY_ADDRESSES")
 
     # ── Initialisation ring buffers (un par BMS actif) ─────────────────────────
+    state.active_ids = list(active_ids)
     for bid in active_ids:
         state.ring[bid] = deque(maxlen=RING_BUFFER_SIZE)
 
@@ -192,7 +194,7 @@ app.add_middleware(
 
 
 # ─── Authentification optionnelle ─────────────────────────────────────────────
-async def check_api_key(x_api_key: Optional[str] = None):
+async def check_api_key(x_api_key: Optional[str] = Header(None)):
     if not API_KEY:
         return
     if x_api_key != API_KEY:
@@ -309,6 +311,7 @@ class FullConfig(BaseModel):
 @app.get("/api/v1/system/status", tags=["Système"])
 async def system_status():
     """État global du système — connectivité de tous les BMS actifs, état du polling."""
+    active = state.active_ids if state.active_ids else BMS_IDS
     bms_status = {
         str(bid): {
             "connected": bid in state.snapshots,
@@ -316,7 +319,7 @@ async def system_status():
             "any_alarm": state.snapshots.get(bid, {}).get("any_alarm", False),
             "soc": state.snapshots.get(bid, {}).get("soc"),
         }
-        for bid in BMS_IDS
+        for bid in active
     }
     return {
         "poll_running": state.poll_task is not None and not state.poll_task.done(),
@@ -541,7 +544,8 @@ async def bms_history_summary(bms_id: int, _=Depends(check_api_key)):
 async def bms_compare(_=Depends(check_api_key)):
     """Vue comparative de tous les BMS actifs — métriques clés côte à côte."""
     result = {}
-    for bid in BMS_IDS:
+    active = state.active_ids if state.active_ids else BMS_IDS
+    for bid in active:
         snap = state.snapshots.get(bid)
         if snap:
             result[str(bid)] = {

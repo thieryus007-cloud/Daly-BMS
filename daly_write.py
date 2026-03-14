@@ -192,7 +192,7 @@ class CommandQueue:
 
     async def submit(self, coro: Coroutine, description: str = "") -> WriteResult:
         """Soumet une coroutine à la file et attend son résultat."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         future = loop.create_future()
         entry = CommandEntry(coro=coro, future=future, description=description)
         await self._queue.put(entry)
@@ -410,7 +410,7 @@ class DalyWriter:
             return WriteResult(success=False, bms_id=self.bms_id,
                                cmd="SET_OVP_CELL", value=voltage_v,
                                error=f"OVP hors plage [{Limits.CELL_OVP_MIN}, {Limits.CELL_OVP_MAX}]V")
-        recovery_v = recovery_v or round(voltage_v - 0.05, 3)
+        recovery_v = recovery_v if recovery_v is not None else round(voltage_v - 0.05, 3)
         raw_trigger  = self._v_to_raw(voltage_v * 1000)    # V → mV
         raw_recovery = self._v_to_raw(recovery_v * 1000)
         payload = struct.pack(">HH", raw_trigger, raw_recovery) + bytes(4)
@@ -428,7 +428,7 @@ class DalyWriter:
             return WriteResult(success=False, bms_id=self.bms_id,
                                cmd="SET_UVP_CELL", value=voltage_v,
                                error=f"UVP hors plage [{Limits.CELL_UVP_MIN}, {Limits.CELL_UVP_MAX}]V")
-        recovery_v = recovery_v or round(voltage_v + 0.05, 3)
+        recovery_v = recovery_v if recovery_v is not None else round(voltage_v + 0.05, 3)
         raw_trigger  = self._v_to_raw(voltage_v * 1000)
         raw_recovery = self._v_to_raw(recovery_v * 1000)
         payload = struct.pack(">HH", raw_trigger, raw_recovery) + bytes(4)
@@ -449,7 +449,7 @@ class DalyWriter:
             return WriteResult(success=False, bms_id=self.bms_id,
                                cmd="SET_OVP_PACK", value=voltage_v,
                                error=f"OVP pack hors plage [{Limits.PACK_V_MIN}, {Limits.PACK_V_MAX}]V")
-        recovery_v = recovery_v or round(voltage_v - 0.5, 1)
+        recovery_v = recovery_v if recovery_v is not None else round(voltage_v - 0.5, 1)
         raw_t = self._v_to_raw(voltage_v, "V10")
         raw_r = self._v_to_raw(recovery_v, "V10")
         payload = struct.pack(">HH", raw_t, raw_r) + bytes(4)
@@ -465,7 +465,7 @@ class DalyWriter:
             return WriteResult(success=False, bms_id=self.bms_id,
                                cmd="SET_UVP_PACK", value=voltage_v,
                                error=f"UVP pack hors plage [{Limits.PACK_V_MIN}, {Limits.PACK_V_MAX}]V")
-        recovery_v = recovery_v or round(voltage_v + 0.5, 1)
+        recovery_v = recovery_v if recovery_v is not None else round(voltage_v + 0.5, 1)
         raw_t = self._v_to_raw(voltage_v, "V10")
         raw_r = self._v_to_raw(recovery_v, "V10")
         payload = struct.pack(">HH", raw_t, raw_r) + bytes(4)
@@ -528,7 +528,7 @@ class DalyWriter:
             return WriteResult(success=False, bms_id=self.bms_id,
                                cmd="SET_OTP_CHG", value=temp_c,
                                error=f"Temp hors plage [{Limits.TEMP_MIN}, {Limits.TEMP_MAX}]°C")
-        recovery_c = recovery_c or (temp_c - 5.0)
+        recovery_c = recovery_c if recovery_c is not None else (temp_c - 5.0)
         payload = self._pack_u8(int(temp_c) + 40, 0)
         payload = bytearray(payload)
         payload[1] = int(recovery_c) + 40
@@ -544,7 +544,7 @@ class DalyWriter:
             return WriteResult(success=False, bms_id=self.bms_id,
                                cmd="SET_UTP_CHG", value=temp_c,
                                error=f"Temp hors plage [{Limits.TEMP_MIN}, {Limits.TEMP_MAX}]°C")
-        recovery_c = recovery_c or (temp_c + 5.0)
+        recovery_c = recovery_c if recovery_c is not None else (temp_c + 5.0)
         payload = bytearray(8)
         payload[0] = int(temp_c) + 40
         payload[1] = int(recovery_c) + 40
@@ -562,7 +562,7 @@ class DalyWriter:
             return WriteResult(success=False, bms_id=self.bms_id,
                                cmd="SET_OTP_DSG", value=temp_c,
                                error=f"Temp hors plage [{Limits.TEMP_MIN}, {Limits.TEMP_MAX}]°C")
-        recovery_c = recovery_c or (temp_c - 5.0)
+        recovery_c = recovery_c if recovery_c is not None else (temp_c - 5.0)
         payload = bytearray(8)
         payload[0] = int(temp_c) + 40
         payload[1] = int(recovery_c) + 40
@@ -576,7 +576,7 @@ class DalyWriter:
             return WriteResult(success=False, bms_id=self.bms_id,
                                cmd="SET_UTP_DSG", value=temp_c,
                                error=f"Temp hors plage [{Limits.TEMP_MIN}, {Limits.TEMP_MAX}]°C")
-        recovery_c = recovery_c or (temp_c + 5.0)
+        recovery_c = recovery_c if recovery_c is not None else (temp_c + 5.0)
         payload = bytearray(8)
         payload[0] = int(temp_c) + 40
         payload[1] = int(recovery_c) + 40

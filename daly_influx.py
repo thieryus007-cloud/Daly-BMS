@@ -570,7 +570,7 @@ class InfluxBridge:
         from daly_protocol import snapshot_to_dict
         for bms_id, snap in snapshots.items():
             d = snap if isinstance(snap, dict) else snapshot_to_dict(snap)
-            self._writer.update(bms_id, d)
+            await self._writer.update(bms_id, d)
 
     @property
     def writer(self) -> DalyInfluxWriter:

@@ -680,13 +680,24 @@ def register_alert_routes(app, alert_bridge: "AlertBridge"):
     Enregistre les routes d'alertes sur l'application FastAPI existante.
     Appelé depuis daly_api.py après la création de l'app.
     """
-    from fastapi import Body
+    from fastapi import Body, Depends, Header, HTTPException, status as http_status
 
     engine  = alert_bridge.engine
     journal = engine.journal
 
+    _api_key = os.getenv("DALY_API_KEY", "")
+
+    async def _check_key(x_api_key: Optional[str] = Header(None)):
+        if not _api_key:
+            return
+        if x_api_key != _api_key:
+            raise HTTPException(
+                status_code=http_status.HTTP_401_UNAUTHORIZED,
+                detail="API key invalide ou manquante (header X-API-Key)",
+            )
+
     @app.get("/api/v1/alerts/active", tags=["Alertes"])
-    async def alerts_active():
+    async def alerts_active(_=Depends(_check_key)):
         """Liste des alertes actuellement actives sur tous les BMS."""
         return {"alerts": engine.active_alerts()}
 
@@ -696,6 +707,7 @@ def register_alert_routes(app, alert_bridge: "AlertBridge"):
         rule_name: Optional[str] = None,
         limit:     int           = 100,
         offset:    int           = 0,
+        _=Depends(_check_key),
     ):
         """Historique des événements d'alerte depuis le journal SQLite."""
         return {
@@ -703,36 +715,36 @@ def register_alert_routes(app, alert_bridge: "AlertBridge"):
         }
 
     @app.get("/api/v1/alerts/counters", tags=["Alertes"])
-    async def alerts_counters(bms_id: Optional[int] = None):
+    async def alerts_counters(bms_id: Optional[int] = None, _=Depends(_check_key)):
         """Compteurs de déclenchements par règle."""
         return {"counters": journal.get_counters(bms_id)}
 
     @app.get("/api/v1/alerts/rules", tags=["Alertes"])
-    async def alerts_rules():
+    async def alerts_rules(_=Depends(_check_key)):
         """Liste de toutes les règles configurées avec leurs paramètres."""
         return {"rules": engine.rules_reference()}
 
     @app.get("/api/v1/alerts/states", tags=["Alertes"])
-    async def alerts_states():
+    async def alerts_states(_=Depends(_check_key)):
         """État de toutes les règles (actives et inactives)."""
         return {"states": engine.all_states()}
 
     @app.post("/api/v1/alerts/snooze/{bms_id}/{rule_name}", tags=["Alertes"])
     async def alert_snooze(bms_id: int, rule_name: str,
-                           duration_s: float = Body(..., embed=True)):
+                           duration_s: float = Body(..., embed=True),
+                           _=Depends(_check_key)):
         """
         Suspend les notifications d'une règle pour une durée en secondes.
         Ex. body : {"duration_s": 3600}  → snooze 1h
         """
         ok = engine.snooze(bms_id, rule_name, duration_s)
         if not ok:
-            from fastapi import HTTPException
             raise HTTPException(status_code=404, detail=f"Règle inconnue : {rule_name}")
         return {"snoozed": True, "rule": rule_name, "bms_id": bms_id,
                 "duration_s": duration_s, "until": time.time() + duration_s}
 
     @app.delete("/api/v1/alerts/snooze/{bms_id}/{rule_name}", tags=["Alertes"])
-    async def alert_unsnooze(bms_id: int, rule_name: str):
+    async def alert_unsnooze(bms_id: int, rule_name: str, _=Depends(_check_key)):
         """Annule le snooze d'une règle."""
         ok = engine.unsnooze(bms_id, rule_name)
         return {"unsnoozed": ok, "rule": rule_name, "bms_id": bms_id}
