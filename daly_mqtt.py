@@ -38,6 +38,19 @@ BRIDGE_HOST      = os.getenv("MQTT_BRIDGE_HOST",  "192.168.1.120")  # IP NanoPi
 BRIDGE_PORT      = int(os.getenv("MQTT_BRIDGE_PORT", "1883"))
 BRIDGE_PREFIX    = os.getenv("MQTT_BRIDGE_PREFIX", "santuario/bms")
 
+# Publication Venus OS via dbus-mqtt-battery (mr-manuel)
+# Le driver tourne sur le NanoPi et subscribe à {MQTT_PREFIX}/{bms_id}/venus
+# Il expose ensuite com.victronenergy.battery sur le D-Bus Venus OS
+VENUS_ENABLED    = os.getenv("MQTT_VENUS_ENABLED", "0") == "1"
+BMS_CAPACITY_AH  = {
+    1: float(os.getenv("BMS1_CAPACITY_AH", "320")),
+    2: float(os.getenv("BMS2_CAPACITY_AH", "360")),
+}
+VENUS_CVL_V_CELL = float(os.getenv("VENUS_CVL_V_CELL", "3.55"))   # Charge Voltage Limit par cellule
+VENUS_CCL_A      = float(os.getenv("VENUS_CCL_A",      "70.0"))   # Charge Current Limit
+VENUS_DCL_A      = float(os.getenv("VENUS_DCL_A",     "100.0"))   # Discharge Current Limit
+VENUS_SOC_LOW    = float(os.getenv("VENUS_SOC_LOW",    "20.0"))   # Seuil SOC low alarm
+
 # Noms des BMS pour les topics — dynamique selon DALY_ADDRESSES
 def _load_bms_names() -> dict[int, str]:
     """Construit le dict {bms_id: nom} depuis DALY_ADDRESSES + MQTT_BMS{N}_NAME."""
@@ -146,6 +159,101 @@ def _status_payload(snap: dict) -> str:
         "cycles":         snap.get("bms_cycles"),
         "ts":             snap.get("timestamp"),
     })
+
+
+def build_venus_payload(snap: dict, bms_id: int) -> str:
+    """
+    Construit le payload JSON attendu par dbus-mqtt-battery (mr-manuel).
+    Référence : https://github.com/mr-manuel/venus-os_dbus-mqtt-battery
+
+    Le driver tourne sur le NanoPi et subscribe à {prefix}/{bms_id}/venus.
+    Il expose ensuite com.victronenergy.battery sur le D-Bus Venus OS,
+    ce qui rend la batterie visible dans VRM avec graphiques, alarmes et DVCC.
+    """
+    soc      = snap.get("soc", 0)
+    volt     = snap.get("pack_voltage", 0.0)
+    curr     = snap.get("pack_current", 0.0)   # + = charge, - = décharge
+    power    = snap.get("power", 0.0)
+    temp_max = snap.get("temp_max", 25.0)
+    temp_min = snap.get("temp_min", 25.0)
+    cap_nom  = BMS_CAPACITY_AH.get(bms_id, 320.0)
+    cap_rem  = snap.get("remaining_capacity", 0.0)
+    n_cells  = snap.get("n_cells", 16)
+    chg_mos  = snap.get("charge_mos", True)
+    dsg_mos  = snap.get("discharge_mos", True)
+    cell_min = (snap.get("cell_min_v") or 0) / 1000.0   # mV → V
+    cell_max = (snap.get("cell_max_v") or 0) / 1000.0
+    alarms   = snap.get("alarms", {})
+
+    # Limites DVCC (communiquées à l'MPPT via Venus OS)
+    cvl  = round(VENUS_CVL_V_CELL * n_cells, 2)         # ex. 3.55 × 16 = 56.8 V
+    ccl  = VENUS_CCL_A if chg_mos else 0.0
+    dcl  = VENUS_DCL_A if dsg_mos else 0.0
+    uvp  = round(2.80 * n_cells, 2)                     # ex. 2.80 × 16 = 44.8 V
+
+    payload = {
+        "Dc": {
+            "Power":       round(power, 1),
+            "Voltage":     round(volt, 3),
+            "Current":     round(curr, 2),
+            "Temperature": round(temp_max, 1),
+        },
+        "Soc":              round(soc, 1),
+        "Capacity":         round(cap_rem, 2),
+        "InstalledCapacity": cap_nom,
+        "ConsumedAmphours": round(max(0.0, cap_nom - cap_rem), 2),
+        "Balancing":        1 if any(snap.get("balancing_mask", [])) else 0,
+        "SystemSwitch":     1,
+
+        # Limites charger — transmises à l'MPPT via DVCC
+        "Info": {
+            "MaxChargeVoltage":    cvl,
+            "MaxChargeCurrent":    ccl,
+            "MaxDischargeCurrent": dcl,
+            "MaxChargeCellVoltage": VENUS_CVL_V_CELL,
+            "BatteryLowVoltage":   uvp,
+        },
+
+        # État système et cellules
+        "System": {
+            "NrOfCellsPerBattery":  n_cells,
+            "NrOfModulesOnline":    1,
+            "NrOfModulesOffline":   0,
+            "MinCellVoltage":       round(cell_min, 4),
+            "MaxCellVoltage":       round(cell_max, 4),
+            "MinCellTemperature":   round(temp_min, 1),
+            "MaxCellTemperature":   round(temp_max, 1),
+        },
+
+        # Permissions MOS
+        "Io": {
+            "AllowToCharge":    1 if chg_mos else 0,
+            "AllowToDischarge": 1 if dsg_mos else 0,
+        },
+
+        # Alarmes (format Victron)
+        "Alarms": {
+            "Alarm":                   1 if snap.get("any_alarm") else 0,
+            "LowVoltage":              1 if alarms.get("cell_uvp") or alarms.get("pack_uvp") else 0,
+            "HighVoltage":             1 if alarms.get("cell_ovp") or alarms.get("pack_ovp") else 0,
+            "LowSoc":                  1 if soc < VENUS_SOC_LOW else 0,
+            "HighChargeCurrent":       1 if alarms.get("chg_ocp") else 0,
+            "HighDischargeCurrent":    1 if alarms.get("dsg_ocp") else 0,
+            "HighCurrent":             1 if alarms.get("scp") else 0,
+            "CellImbalance":           1 if alarms.get("cell_delta") else 0,
+            "HighChargeTemperature":   1 if alarms.get("chg_otp") else 0,
+            "LowChargeTemperature":    0,
+            "HighTemperature":         1 if alarms.get("chg_otp") else 0,
+            "LowTemperature":          0,
+            "FuseBlown":               0,
+        },
+
+        # Historique
+        "History": {
+            "ChargeCycles": snap.get("bms_cycles", 0),
+        },
+    }
+    return json.dumps(payload)
 
 
 # ─── Classe principale publisher ──────────────────────────────────────────────
@@ -335,6 +443,16 @@ class DalyMqttPublisher:
             qos=MQTT_QOS_STATUS,
             retain=True,
         )
+
+        # Payload Venus OS pour dbus-mqtt-battery (NanoPi mr-manuel driver)
+        # Topic : {prefix}/{bms_id}/venus  — ex. santuario/bms/1/venus
+        if VENUS_ENABLED:
+            await client.publish(
+                topic(bms_id, "venus"),
+                payload=build_venus_payload(snap, bms_id),
+                qos=MQTT_QOS_STATUS,
+                retain=True,
+            )
 
         # Tensions individuelles par cellule (topics séparés)
         for i in range(1, self.cell_count + 1):
