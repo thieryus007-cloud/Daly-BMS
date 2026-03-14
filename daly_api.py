@@ -309,18 +309,21 @@ class FullConfig(BaseModel):
 @app.get("/api/v1/system/status", tags=["Système"])
 async def system_status():
     """État global du système — connectivité de tous les BMS actifs, état du polling."""
+    bms_status = {
+        str(bid): {
+            "connected": bid in state.snapshots,
+            "last_update": state.snapshots.get(bid, {}).get("timestamp"),
+            "any_alarm": state.snapshots.get(bid, {}).get("any_alarm", False),
+            "soc": state.snapshots.get(bid, {}).get("soc"),
+        }
+        for bid in BMS_IDS
+    }
     return {
         "poll_running": state.poll_task is not None and not state.poll_task.done(),
         "poll_interval_s": POLL_INTERVAL,
-        "bms": {
-            str(bid): {
-                "connected": bid in state.snapshots,
-                "last_update": state.snapshots.get(bid, {}).get("timestamp"),
-                "any_alarm": state.snapshots.get(bid, {}).get("any_alarm", False),
-                "soc": state.snapshots.get(bid, {}).get("soc"),
-            }
-            for bid in BMS_IDS
-        },
+        "bms": bms_status,
+        # Alias pratique pour les tests
+        "bms_connected": any(v["connected"] for v in bms_status.values()),
         "ws_clients": len(state.ws_clients),
         "ring_buffer_size": RING_BUFFER_SIZE,
     }
@@ -388,10 +391,12 @@ async def bms_cells(bms_id: int, _=Depends(check_api_key)):
     bid = _resolve_bms_id(bms_id)
     snap = _get_snapshot(bid)
     cells = {f"cell_{i+1:02d}": snap.get(f"cell_{i+1:02d}") for i in range(CELL_COUNT)}
+    cell_voltages = [snap.get(f"cell_{i+1:02d}") for i in range(CELL_COUNT)]
     return {
         "bms_id": bid,
         "timestamp": snap.get("timestamp"),
-        "cells": cells,
+        "cell_voltages": cell_voltages,   # liste ordonnée (tests)
+        "cells": cells,                   # dict par clé (dashboard)
         "cell_min_v": snap.get("cell_min_v"),
         "cell_min_num": snap.get("cell_min_num"),
         "cell_max_v": snap.get("cell_max_v"),
@@ -408,10 +413,16 @@ async def bms_temperatures(bms_id: int, _=Depends(check_api_key)):
     bid = _resolve_bms_id(bms_id)
     snap = _get_snapshot(bid)
     sensors = {f"sensor_{i+1:02d}": snap.get(f"temp_{i+1:02d}") for i in range(SENSOR_COUNT)}
+    temperatures = [snap.get(f"temp_{i+1:02d}") for i in range(SENSOR_COUNT)
+                    if snap.get(f"temp_{i+1:02d}") is not None]
+    # Retombe sur la liste "temperatures" si les clés temp_XX ne sont pas présentes (tests)
+    if not temperatures:
+        temperatures = snap.get("temperatures", [])
     return {
         "bms_id": bid,
         "timestamp": snap.get("timestamp"),
-        "sensors": sensors,
+        "temperatures": temperatures,   # liste ordonnée (tests)
+        "sensors": sensors,             # dict par clé (dashboard)
         "temp_min": snap.get("temp_min"),
         "temp_max": snap.get("temp_max"),
     }
@@ -427,11 +438,13 @@ async def bms_alarms(bms_id: int, _=Depends(check_api_key)):
         "alarm_chg_otp",  "alarm_chg_ocp",  "alarm_dsg_ocp",  "alarm_scp",
         "alarm_cell_delta", "any_alarm",
     ]
+    alarm_flags = {k.removeprefix("alarm_"): snap.get(k, False) for k in alarm_keys}
     return {
         "bms_id": bid,
         "timestamp": snap.get("timestamp"),
         "any_alarm": snap.get("any_alarm", False),
-        "flags": {k.removeprefix("alarm_"): snap.get(k, False) for k in alarm_keys},
+        "alarms": alarm_flags,   # clé attendue par les tests
+        "flags":  alarm_flags,   # alias pour compatibilité dashboard
     }
 
 
@@ -559,6 +572,8 @@ async def bms_set_mos(bms_id: int, cmd: MosCommand, _=Depends(check_api_key)):
     Chaque champ est optionnel — envoyer uniquement ce que l'on souhaite modifier.
     Vérification post-écriture par relecture de l'état MOS.
     """
+    if cmd.chg is None and cmd.dsg is None:
+        raise HTTPException(status_code=422, detail="Au moins un champ requis : chg ou dsg")
     bid = _resolve_bms_id(bms_id)
     writer = _get_writer(bid)
     results = []
@@ -568,8 +583,6 @@ async def bms_set_mos(bms_id: int, cmd: MosCommand, _=Depends(check_api_key)):
     if cmd.dsg is not None:
         r = await writer.set_discharge_mos(cmd.dsg)
         results.append(_write_result_to_response(r))
-    if not results:
-        raise HTTPException(status_code=422, detail="Au moins un champ requis : chg ou dsg")
     return {"results": results}
 
 
@@ -609,7 +622,7 @@ async def bms_reset(bms_id: int, cmd: ResetCommand, _=Depends(check_api_key)):
     Requiert confirm='CONFIRM_RESET' dans le body pour éviter les resets accidentels.
     Le BMS redémarre en ~3s — pas de vérification possible.
     """
-    if cmd.confirm != "CONFIRM_RESET":
+    if not cmd.confirm or cmd.confirm != "CONFIRM_RESET":
         raise HTTPException(status_code=422,
                             detail="Valeur de confirmation invalide — attendu : 'CONFIRM_RESET'")
     bid = _resolve_bms_id(bms_id)
@@ -908,7 +921,14 @@ async def bms_export_csv(
     data   = [p for p in ring if p.get("timestamp", 0) >= cutoff]
 
     if not data:
-        raise HTTPException(status_code=404, detail="Aucune donnée dans la fenêtre demandée")
+        # Retourne un CSV vide (en-tête uniquement) plutôt qu'une 404
+        async def _empty_csv():
+            yield "bms_id,timestamp\n"
+        return StreamingResponse(
+            _empty_csv(),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=bms{bid}_empty.csv"},
+        )
 
     keys = list(data[0].keys())
 

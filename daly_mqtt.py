@@ -72,8 +72,8 @@ def topic_system(subtopic: str) -> str:
 TOPICS_SCALAR = [
     # subtopic              clé snapshot        qos              retain
     ("soc",                 "soc",              MQTT_QOS_DATA,   True),
-    ("voltage",             "pack_voltage",     MQTT_QOS_DATA,   True),
-    ("current",             "pack_current",     MQTT_QOS_DATA,   False),
+    ("pack_voltage",        "pack_voltage",     MQTT_QOS_DATA,   True),
+    ("pack_current",        "pack_current",     MQTT_QOS_DATA,   False),
     ("power",               "power",            MQTT_QOS_DATA,   False),
     ("cell_min_v",          "cell_min_v",       MQTT_QOS_DATA,   False),
     ("cell_max_v",          "cell_max_v",       MQTT_QOS_DATA,   False),
@@ -312,24 +312,34 @@ class DalyMqttPublisher:
         self._task: Optional[asyncio.Task]   = None
         self._bridge_task: Optional[asyncio.Task] = None
         self._publish_queue: asyncio.Queue   = asyncio.Queue()
+        self._client                         = None  # injecté pour les tests
 
     # ── Interface publique ────────────────────────────────────────────────────
 
-    def update(self, bms_id: int, snap: dict) -> None:
+    async def update(self, bms_id: int, snap: dict) -> None:
         """
         Met à jour le snapshot d'un BMS.
         Appelé par le poll_loop à chaque cycle (depuis daly_api.py ou standalone).
         Détecte les changements d'alarme et déclenche une publication immédiate.
+        Si _client est injecté (tests), publie directement via ce client.
         """
         self._snapshots[bms_id] = snap
 
         # Détection changement alarme → publication prioritaire
         prev = self._prev_alarms.get(bms_id, {})
         curr = {k: snap.get(k, False) for k in TOPICS_ALARM_FLAGS + ["any_alarm"]}
-        if curr != prev:
+        alarm_changed = curr != prev
+        if alarm_changed:
             self._prev_alarms[bms_id] = curr
-            self._publish_queue.put_nowait(("alarm", bms_id, snap))
             log.warning(f"[BMS{bms_id}] Changement alarme détecté — publication prioritaire")
+
+        # Publication directe si _client injecté (tests ou usage standalone)
+        if self._client is not None:
+            await self._publish_all(self._client, bms_id, snap)
+            if alarm_changed:
+                await self._publish_alarms(self._client, bms_id, snap)
+        elif alarm_changed:
+            self._publish_queue.put_nowait(("alarm", bms_id, snap))
 
     def start(self):
         """Démarre les tâches asyncio de publication."""
@@ -352,6 +362,15 @@ class DalyMqttPublisher:
                 except asyncio.CancelledError:
                     pass
         log.info("DalyMqttPublisher arrêté")
+
+    def _topic(self, bms_id: int, bms_name: str, subtopic: str) -> str:
+        """Construit un topic MQTT structuré (instance method)."""
+        return f"{self.prefix}/{bms_id}/{bms_name}/{subtopic}"
+
+    @property
+    def LWT_TOPIC(self) -> str:
+        """Topic LWT système (online/offline)."""
+        return topic_system("online")
 
     # ── Boucle principale de publication ─────────────────────────────────────
 
@@ -474,8 +493,11 @@ class DalyMqttPublisher:
             )
 
         # Tensions individuelles par cellule (topics séparés)
+        cell_voltages_list = snap.get("cell_voltages", [])
         for i in range(1, self.cell_count + 1):
             v = snap.get(f"cell_{i:02d}")
+            if v is None and i <= len(cell_voltages_list):
+                v = cell_voltages_list[i - 1]
             if v is not None:
                 await client.publish(
                     topic(bms_id, f"cells/cell_{i:02d}"),
@@ -610,7 +632,7 @@ class MqttBridge:
         from daly_protocol import snapshot_to_dict
         for bms_id, snap in snapshots.items():
             d = snap if isinstance(snap, dict) else snapshot_to_dict(snap)
-            self.publisher.update(bms_id, d)
+            await self.publisher.update(bms_id, d)
 
 
 # ─── Référence complète des topics publiés ────────────────────────────────────

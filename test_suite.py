@@ -269,9 +269,12 @@ class TestDalyWrite:
             return MagicMock(success=True)
 
         q._execute = fake_exec
-        await q.enqueue(MagicMock(name="CMD_A"))
-        await q.enqueue(MagicMock(name="CMD_B"))
-        await q.enqueue(MagicMock(name="CMD_C"))
+
+        # MagicMock(name=...) sets repr, not the .name attribute — use SimpleNamespace
+        import types
+        await q.enqueue(types.SimpleNamespace(name="CMD_A"))
+        await q.enqueue(types.SimpleNamespace(name="CMD_B"))
+        await q.enqueue(types.SimpleNamespace(name="CMD_C"))
         # Vider la queue
         while not q._queue.empty():
             item = await q._queue.get()
@@ -298,8 +301,26 @@ class TestDalyWrite:
 def mock_app_state():
     """Injecte des snapshots simulés dans l'AppState de l'API."""
     from daly_api import app, state
+    from daly_write import WriteResult
     state.snapshots[1] = _make_snapshot(1, soc=72.0, cell_delta_mv=15)
     state.snapshots[2] = _make_snapshot(2, soc=68.0, cell_delta_mv=12)
+
+    # Mock manager pour les endpoints de contrôle (mos, reset, preset)
+    mock_writer = MagicMock()
+    mock_writer.set_charge_mos = AsyncMock(
+        return_value=WriteResult(success=True, bms_id=1, cmd="SET_CHG_MOS", value=True))
+    mock_writer.set_discharge_mos = AsyncMock(
+        return_value=WriteResult(success=True, bms_id=1, cmd="SET_DSG_MOS", value=True))
+    mock_writer.reset = AsyncMock(
+        return_value=WriteResult(success=True, bms_id=1, cmd="RESET", value=0))
+    mock_writer.apply_profile = AsyncMock(
+        return_value=[WriteResult(success=True, bms_id=1, cmd="PRESET", value=0)])
+
+    mock_manager = MagicMock()
+    mock_manager.bms_ids = [1, 2]
+    mock_manager.writer = MagicMock(return_value=mock_writer)
+    state.manager = mock_manager
+
     return state
 
 
@@ -371,7 +392,7 @@ class TestDalyAPI:
 
     def test_mos_command_valid(self, client):
         r = client.post("/api/v1/bms/1/mos",
-                        json={"charge": True, "discharge": True})
+                        json={"chg": True, "dsg": True})
         assert r.status_code in (200, 202)
 
     def test_mos_command_invalid_payload(self, client):

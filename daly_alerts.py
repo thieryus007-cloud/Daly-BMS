@@ -234,7 +234,6 @@ class AlertJournal:
 
     def __init__(self, db_path: str = ALERT_DB_PATH):
         self.db_path    = db_path
-        self._write_lock = asyncio.Lock()
         self._init_db()
 
     def _conn(self) -> sqlite3.Connection:
@@ -286,40 +285,30 @@ class AlertJournal:
                 ON alert_events (bms_id, rule_name)
             """)
 
-    async def log_triggered(self, bms_id: int, rule: AlertRule,
-                            value: str, notified: bool = False):
-        """Écriture sérialisée via _write_lock + exécutée dans un thread."""
+    def log_triggered(self, bms_id: int, rule: AlertRule,
+                      value: str, notified: bool = False):
+        """Écriture directe SQLite (appelable sans await)."""
         params = (bms_id, BMS_NAMES.get(bms_id, f"BMS{bms_id}"),
                   rule.name, rule.severity.value, value, time.time(), int(notified))
+        with self._conn() as conn:
+            conn.execute("""
+                INSERT INTO alert_events
+                (bms_id, bms_name, rule_name, severity, event, value, timestamp, notified)
+                VALUES (?, ?, ?, ?, 'triggered', ?, ?, ?)
+            """, params)
 
-        def _write():
-            with self._conn() as conn:
-                conn.execute("""
-                    INSERT INTO alert_events
-                    (bms_id, bms_name, rule_name, severity, event, value, timestamp, notified)
-                    VALUES (?, ?, ?, ?, 'triggered', ?, ?, ?)
-                """, params)
-
-        async with self._write_lock:
-            await asyncio.get_event_loop().run_in_executor(None, _write)
-
-    async def log_cleared(self, bms_id: int, rule: AlertRule,
-                          triggered_at: float, value: str):
-        """Écriture sérialisée via _write_lock + exécutée dans un thread."""
+    def log_cleared(self, bms_id: int, rule: AlertRule,
+                    triggered_at: float, value: str):
+        """Écriture directe SQLite (appelable sans await)."""
         duration = round(time.time() - triggered_at, 1) if triggered_at else None
         params = (bms_id, BMS_NAMES.get(bms_id, f"BMS{bms_id}"),
                   rule.name, rule.severity.value, value, time.time(), duration)
-
-        def _write():
-            with self._conn() as conn:
-                conn.execute("""
-                    INSERT INTO alert_events
-                    (bms_id, bms_name, rule_name, severity, event, value, timestamp, duration_s)
-                    VALUES (?, ?, ?, ?, 'cleared', ?, ?, ?)
-                """, params)
-
-        async with self._write_lock:
-            await asyncio.get_event_loop().run_in_executor(None, _write)
+        with self._conn() as conn:
+            conn.execute("""
+                INSERT INTO alert_events
+                (bms_id, bms_name, rule_name, severity, event, value, timestamp, duration_s)
+                VALUES (?, ?, ?, ?, 'cleared', ?, ?, ?)
+            """, params)
 
     def get_history(self, bms_id: Optional[int] = None,
                     limit: int = 100, offset: int = 0,
@@ -524,7 +513,7 @@ class AlertEngine:
                 state.triggered_at = now
                 state.trigger_count += 1
                 value_str = str(rule.value_fn(snap))
-                await self.journal.log_triggered(bms_id, rule, value_str)
+                self.journal.log_triggered(bms_id, rule, value_str)
                 log.warning(f"[BMS{bms_id}] ALERTE DÉCLENCHÉE : {rule.name} = {value_str}")
 
                 # Notification si pas snoozée et cooldown respecté
@@ -543,7 +532,7 @@ class AlertEngine:
 
                 if clear_ok:
                     value_str = str(rule.value_fn(snap))
-                    await self.journal.log_cleared(bms_id, rule, state.triggered_at, value_str)
+                    self.journal.log_cleared(bms_id, rule, state.triggered_at, value_str)
                     log.info(f"[BMS{bms_id}] Alerte effacée : {rule.name}")
                     state.active      = False
                     state.cleared_at  = now

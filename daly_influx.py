@@ -27,7 +27,8 @@ INFLUX_BUCKET     = os.getenv("INFLUX_BUCKET", "daly_bms")
 INFLUX_BUCKET_DS  = os.getenv("INFLUX_BUCKET_DS", "daly_bms_1m")  # downsampled
 BATCH_SIZE        = int(os.getenv("INFLUX_BATCH_SIZE", "50"))
 BATCH_INTERVAL_S  = float(os.getenv("INFLUX_BATCH_INTERVAL", "5.0"))
-RETENTION_DAYS    = int(os.getenv("INFLUX_RETENTION_DAYS", "30"))
+RETENTION_DAYS       = int(os.getenv("INFLUX_RETENTION_DAYS", "30"))
+INFLUX_RETENTION_DAYS = RETENTION_DAYS   # alias pour les imports externes
 WRITE_INTERVAL    = float(os.getenv("INFLUX_WRITE_INTERVAL", "1.0"))
 
 from config import BMS_NAMES
@@ -54,7 +55,7 @@ def _point_status(snap: dict, bms_id: int) -> Optional[Point]:
     ts = snap.get("timestamp")
     if ts is None:
         return None
-    p = Point("bms_status").time(int(ts * 1e9), WritePrecision.NANOSECONDS)
+    p = Point("bms_status").time(int(ts * 1e9), WritePrecision.NS)
     for tag, val in _base_tags(bms_id).items():
         p = p.tag(tag, val)
     fields = {
@@ -83,7 +84,7 @@ def _point_cells(snap: dict, bms_id: int, cell_count: int = 16) -> Optional[Poin
     ts = snap.get("timestamp")
     if ts is None:
         return None
-    p = Point("bms_cells").time(int(ts * 1e9), WritePrecision.NANOSECONDS)
+    p = Point("bms_cells").time(int(ts * 1e9), WritePrecision.NS)
     for tag, val in _base_tags(bms_id).items():
         p = p.tag(tag, val)
     has_data = False
@@ -109,7 +110,7 @@ def _point_temperatures(snap: dict, bms_id: int, sensor_count: int = 4) -> Optio
     ts = snap.get("timestamp")
     if ts is None:
         return None
-    p = Point("bms_temperatures").time(int(ts * 1e9), WritePrecision.NANOSECONDS)
+    p = Point("bms_temperatures").time(int(ts * 1e9), WritePrecision.NS)
     for tag, val in _base_tags(bms_id).items():
         p = p.tag(tag, val)
     has_data = False
@@ -135,7 +136,7 @@ def _point_alarms(snap: dict, bms_id: int) -> Optional[Point]:
     ts = snap.get("timestamp")
     if ts is None:
         return None
-    p = Point("bms_alarms").time(int(ts * 1e9), WritePrecision.NANOSECONDS)
+    p = Point("bms_alarms").time(int(ts * 1e9), WritePrecision.NS)
     for tag, val in _base_tags(bms_id).items():
         p = p.tag(tag, val)
     alarm_keys = [
@@ -159,7 +160,7 @@ def _point_event(bms_id: int, event_type: str,
     Utilisé pour journaliser les transitions d'alarme et commandes critiques.
     """
     p = (Point("bms_events")
-         .time(int(time.time() * 1e9), WritePrecision.NANOSECONDS)
+         .time(int(time.time() * 1e9), WritePrecision.NS)
          .tag("event_type", event_type)
          .field("event_value", float(event_value))
          .field("trigger_count", int(trigger_count)))
@@ -178,7 +179,7 @@ def _point_balancing(snap: dict, bms_id: int) -> Optional[Point]:
     mask = snap.get("balancing_mask", [])
     if ts is None or not mask:
         return None
-    p = Point("bms_balancing").time(int(ts * 1e9), WritePrecision.NANOSECONDS)
+    p = Point("bms_balancing").time(int(ts * 1e9), WritePrecision.NS)
     for tag, val in _base_tags(bms_id).items():
         p = p.tag(tag, val)
     active = 0
@@ -272,7 +273,7 @@ class InfluxBatchWriter:
                     bucket=self._bucket,
                     org=self._org,
                     record=batch,
-                    write_precision=WritePrecision.NANOSECONDS,
+                    write_precision=WritePrecision.NS,
                 ),
             )
             self._written_total += len(batch)
@@ -321,6 +322,7 @@ class DalyInfluxWriter:
 
         self._client: Optional[InfluxDBClient]    = None
         self._writer: Optional[InfluxBatchWriter] = None
+        self._write_api                           = None  # injecté pour les tests
         self._prev_alarms: dict[int, dict]        = {}
         self._alarm_counters: dict[int, dict]     = {}
         self._pending_tasks: set[asyncio.Task]    = set()
@@ -348,15 +350,19 @@ class DalyInfluxWriter:
             self._client.close()
         log.info("DalyInfluxWriter fermé")
 
-    def update(self, bms_id: int, snap: dict):
+    async def update(self, bms_id: int, snap: dict):
         """
         Traite un snapshot et l'écrit dans InfluxDB.
         Appelé depuis le poll_loop ou MqttBridge.
-        La task est trackée pour garantir son exécution avant l'arrêt du writer.
+        Si _write_api est injecté (tests), écriture directe et synchrone.
+        Sinon la task est trackée pour garantir son exécution avant l'arrêt du writer.
         """
-        task = asyncio.create_task(self._write_snapshot(bms_id, snap))
-        self._pending_tasks.add(task)
-        task.add_done_callback(self._pending_tasks.discard)
+        if self._write_api is not None:
+            await self._write_snapshot(bms_id, snap)
+        else:
+            task = asyncio.create_task(self._write_snapshot(bms_id, snap))
+            self._pending_tasks.add(task)
+            task.add_done_callback(self._pending_tasks.discard)
 
     async def _write_snapshot(self, bms_id: int, snap: dict):
         points = [
@@ -366,13 +372,18 @@ class DalyInfluxWriter:
             _point_alarms(snap, bms_id),
             _point_balancing(snap, bms_id),
         ]
-        await self._writer.add([p for p in points if p is not None])
+        filtered = [p for p in points if p is not None]
+        if self._write_api is not None:
+            await self._write_api.write(bucket=self.bucket, record=filtered)
+        else:
+            await self._writer.add(filtered)
         await self._detect_alarm_events(bms_id, snap)
 
     async def _detect_alarm_events(self, bms_id: int, snap: dict):
         """
         Compare les flags d'alarme avec l'état précédent.
         Écrit un événement dans bms_events à chaque transition 0→1 ou 1→0.
+        Supporte le format plat (alarm_cell_ovp) et le dict imbriqué (alarms.cell_ovp).
         """
         alarm_keys = [
             "alarm_cell_ovp", "alarm_cell_uvp", "alarm_pack_ovp", "alarm_pack_uvp",
@@ -381,9 +392,11 @@ class DalyInfluxWriter:
         ]
         prev = self._prev_alarms.get(bms_id, {})
         counters = self._alarm_counters.setdefault(bms_id, {k: 0 for k in alarm_keys})
+        nested = snap.get("alarms", {})
 
         for key in alarm_keys:
-            curr_val = bool(snap.get(key, False))
+            short = key.removeprefix("alarm_")
+            curr_val = bool(snap.get(key, False) or nested.get(short, False))
             prev_val = bool(prev.get(key, False))
 
             if curr_val and not prev_val:
@@ -395,7 +408,7 @@ class DalyInfluxWriter:
                     event_value=snap.get("pack_voltage", 0.0),
                     trigger_count=counters[key],
                 )
-                await self._writer.add_event(event)
+                await self._write_event(event)
                 log.warning(f"[BMS{bms_id}] Événement InfluxDB : {key} DÉCLENCHÉ "
                             f"(#{counters[key]})")
 
@@ -407,10 +420,17 @@ class DalyInfluxWriter:
                     event_value=snap.get("pack_voltage", 0.0),
                     trigger_count=counters.get(key, 0),
                 )
-                await self._writer.add_event(event)
+                await self._write_event(event)
                 log.info(f"[BMS{bms_id}] Événement InfluxDB : {key} EFFACÉ")
 
-        self._prev_alarms[bms_id] = {k: bool(snap.get(k, False)) for k in alarm_keys}
+        self._prev_alarms[bms_id] = {k: bool(snap.get(k, False) or nested.get(k.removeprefix("alarm_"), False)) for k in alarm_keys}
+
+    async def _write_event(self, event: Point):
+        """Écrit un point d'événement via _write_api (tests) ou _writer (production)."""
+        if self._write_api is not None:
+            await self._write_api.write(bucket=self.bucket, record=[event])
+        elif self._writer:
+            await self._writer.add_event(event)
 
     async def write_command_event(self, bms_id: int, command: str, value: float):
         """
@@ -418,7 +438,7 @@ class DalyInfluxWriter:
         Appelé depuis daly_api.py sur les routes POST critiques.
         """
         event = _point_event(bms_id, f"cmd_{command}", value)
-        await self._writer.add_event(event)
+        await self._write_event(event)
         log.info(f"[BMS{bms_id}] Événement commande : {command} = {value}")
 
     @property
