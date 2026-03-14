@@ -1,5 +1,5 @@
 # DalyBMS Interface — Documentation Complète
-## Installation Santuario — Badalucco (Ligurie, IT)
+## Installation Santuario
 
 **Version** : 1.0  
 **Dernière mise à jour** : Mars 2026  
@@ -1206,5 +1206,5 @@ Exécuter dans l'ordre lors de la réception du kit :
 
 ---
 
-*Documentation générée pour le projet DalyBMS Interface — Installation Santuario, Badalucco (Ligurie, IT)*  
+*Documentation générée pour le projet DalyBMS Interface — Installation Santuario *  
 *Livrables D1–D12 — Version 1.0*
