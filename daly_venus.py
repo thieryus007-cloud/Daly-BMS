@@ -64,15 +64,8 @@ LOCAL_PREFIX     = os.getenv("MQTT_PREFIX",         "santuario/bms")
 PUBLISH_INTERVAL = float(os.getenv("VENUS_PUBLISH_INTERVAL", "5.0"))
 KEEPALIVE_INTERVAL = float(os.getenv("VENUS_KEEPALIVE_INTERVAL", "55.0"))
 
-# Noms BMS
-BMS_NAMES = {
-    1: os.getenv("BMS1_PRODUCT_NAME", "Daly LiFePO4 320Ah"),
-    2: os.getenv("BMS2_PRODUCT_NAME", "Daly LiFePO4 360Ah"),
-}
-BMS_CAPACITY = {
-    1: float(os.getenv("BMS1_CAPACITY_AH", "320")),
-    2: float(os.getenv("BMS2_CAPACITY_AH", "360")),
-}
+# Noms et capacités BMS — source unique via config.py (I7)
+from config import BMS_NAMES, BMS_CAPACITY_AH as BMS_CAPACITY
 
 
 # ─── Helpers topic dbus-mqtt-devices ─────────────────────────────────────────

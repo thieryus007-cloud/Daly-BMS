@@ -42,20 +42,10 @@ BRIDGE_PREFIX    = os.getenv("MQTT_BRIDGE_PREFIX", "santuario/bms")
 # Le driver tourne sur le NanoPi et subscribe à {MQTT_PREFIX}/{bms_id}/venus
 # Il expose ensuite com.victronenergy.battery sur le D-Bus Venus OS
 VENUS_ENABLED    = os.getenv("MQTT_VENUS_ENABLED", "0") == "1"
-BMS_CAPACITY_AH  = {
-    1: float(os.getenv("BMS1_CAPACITY_AH", "320")),
-    2: float(os.getenv("BMS2_CAPACITY_AH", "360")),
-}
 VENUS_SOC_LOW    = float(os.getenv("VENUS_SOC_LOW", "20.0"))   # Seuil SOC low alarm (%)
 
-# Noms des BMS pour les topics — dynamique selon DALY_ADDRESSES
-def _load_bms_names() -> dict[int, str]:
-    """Construit le dict {bms_id: nom} depuis DALY_ADDRESSES + MQTT_BMS{N}_NAME."""
-    raw = os.getenv("DALY_ADDRESSES", "0x01,0x02")
-    ids = sorted({int(x.strip(), 0) for x in raw.split(",") if x.strip()})
-    return {bid: os.getenv(f"MQTT_BMS{bid}_NAME", f"bms{bid:02d}") for bid in ids}
-
-BMS_NAMES = _load_bms_names()
+# Noms et capacités des BMS — source unique via config.py (I7)
+from config import BMS_NAMES, BMS_CAPACITY_AH
 
 
 # ─── Structure de topic ───────────────────────────────────────────────────────
@@ -185,7 +175,6 @@ def build_venus_payload(snap: dict, bms_id: int) -> str:
     cell_max = (snap.get("cell_max_v") or 0) / 1000.0
     cell_min_num = snap.get("cell_min_num", 0)
     cell_max_num = snap.get("cell_max_num", 0)
-    alarms   = snap.get("alarms", {})
     bal_mask = snap.get("balancing_mask", [])
 
     # Tensions individuelles des cellules (mV → V)
@@ -206,8 +195,11 @@ def build_venus_payload(snap: dict, bms_id: int) -> str:
         ttg = int((cap_rem / abs(curr)) * 3600)
 
     # Sévérité alarmes Victron : 0=ok, 1=warning, 2=alarm
+    # Supporte le format plat (alarm_{key} — production) et le dict imbriqué (tests)
     def _alv(key: str, severity: int = 2) -> int:
-        return severity if alarms.get(key) else 0
+        return severity if (
+            snap.get(f"alarm_{key}") or snap.get("alarms", {}).get(key)
+        ) else 0
 
     payload = {
         # ── Mesures DC ──────────────────────────────────────────────────────────

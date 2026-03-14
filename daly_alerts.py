@@ -9,7 +9,6 @@ Installation Santuario — Badalucco
 import asyncio
 import logging
 import os
-import smtplib
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -17,6 +16,7 @@ from email.mime.text import MIMEText
 from enum import Enum
 from typing import Any, Callable, Optional
 
+import aiosmtplib
 import httpx
 
 log = logging.getLogger("daly.alerts")
@@ -33,13 +33,7 @@ SMTP_TO             = os.getenv("SMTP_TO",          "")
 ALERT_DB_PATH       = os.getenv("ALERT_DB_PATH", "/data/dalybms/alerts.db")
 CHECK_INTERVAL      = float(os.getenv("ALERT_CHECK_INTERVAL", "1.0"))
 
-def _load_bms_names() -> dict[int, str]:
-    """Construit le dict {bms_id: nom} depuis DALY_ADDRESSES + ALERT_BMS{N}_NAME."""
-    raw = os.getenv("DALY_ADDRESSES", "0x01,0x02")
-    ids = sorted({int(x.strip(), 0) for x in raw.split(",") if x.strip()})
-    return {bid: os.getenv(f"ALERT_BMS{bid}_NAME", f"BMS {bid}") for bid in ids}
-
-BMS_NAMES = _load_bms_names()
+from config import BMS_NAMES
 
 
 # ─── Sévérité ─────────────────────────────────────────────────────────────────
@@ -223,6 +217,9 @@ class AlertState:
 
 
 # ─── Journal SQLite ───────────────────────────────────────────────────────────
+_SCHEMA_VERSION = 1
+
+
 class AlertJournal:
     """
     Journal persistant des événements d'alerte dans SQLite.
@@ -231,6 +228,8 @@ class AlertJournal:
     Les écritures sont sérialisées via _write_lock pour éviter les erreurs
     "database is locked" sous charge. Les lectures (requêtes SELECT) utilisent
     run_in_executor pour ne pas bloquer la boucle asyncio.
+
+    Migrations : table schema_version — incrémentée à chaque évolution du schéma.
     """
 
     def __init__(self, db_path: str = ALERT_DB_PATH):
@@ -243,6 +242,27 @@ class AlertJournal:
 
     def _init_db(self):
         with self._conn() as conn:
+            # Table de versionnement du schéma (I4)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS schema_version (
+                    version INTEGER PRIMARY KEY
+                )
+            """)
+            row = conn.execute("SELECT version FROM schema_version").fetchone()
+            current_version = row[0] if row else 0
+
+            if current_version < _SCHEMA_VERSION:
+                self._migrate(conn, current_version)
+                conn.execute(
+                    "INSERT OR REPLACE INTO schema_version VALUES (?)",
+                    (_SCHEMA_VERSION,)
+                )
+        log.info(f"AlertJournal initialisé : {self.db_path} (schema v{_SCHEMA_VERSION})")
+
+    def _migrate(self, conn: sqlite3.Connection, from_version: int):
+        """Applique les migrations manquantes de from_version → _SCHEMA_VERSION."""
+        if from_version < 1:
+            log.info("AlertJournal migration v0 → v1 : création schéma initial")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS alert_events (
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -265,7 +285,6 @@ class AlertJournal:
                 CREATE INDEX IF NOT EXISTS idx_alert_bms
                 ON alert_events (bms_id, rule_name)
             """)
-        log.info(f"AlertJournal initialisé : {self.db_path}")
 
     async def log_triggered(self, bms_id: int, rule: AlertRule,
                             value: str, notified: bool = False):
@@ -409,8 +428,8 @@ class Notifier:
         return False
 
     @staticmethod
-    def send_email(bms_id: int, rule: AlertRule,
-                   value: str, event: str = "triggered") -> bool:
+    async def send_email(bms_id: int, rule: AlertRule,
+                         value: str, event: str = "triggered") -> bool:
         if not SMTP_HOST or not SMTP_TO:
             log.debug("Email non configuré — notification ignorée")
             return False
@@ -424,11 +443,13 @@ class Notifier:
         msg["From"]    = SMTP_FROM
         msg["To"]      = SMTP_TO
         try:
-            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as srv:
-                srv.starttls()
+            async with aiosmtplib.SMTP(
+                hostname=SMTP_HOST, port=SMTP_PORT, timeout=10
+            ) as smtp:
+                await smtp.starttls()
                 if SMTP_USER:
-                    srv.login(SMTP_USER, SMTP_PASS)
-                srv.send_message(msg)
+                    await smtp.login(SMTP_USER, SMTP_PASS)
+                await smtp.send_message(msg)
             log.info(f"Email OK : [{rule.name}] BMS{bms_id} → {SMTP_TO}")
             return True
         except Exception as exc:
@@ -550,14 +571,9 @@ class AlertEngine:
                 tasks = []
                 if TELEGRAM_TOKEN:
                     tasks.append(Notifier.send_telegram(bms_id, rule, value_str, event))
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                # Email en thread séparé (smtplib est synchrone)
                 if SMTP_HOST:
-                    loop = asyncio.get_event_loop()
-                    await loop.run_in_executor(
-                        None,
-                        Notifier.send_email, bms_id, rule, value_str, event
-                    )
+                    tasks.append(Notifier.send_email(bms_id, rule, value_str, event))
+                results = await asyncio.gather(*tasks, return_exceptions=True)
             except Exception as exc:
                 log.error(f"Notification worker erreur : {exc}", exc_info=True)
             finally:

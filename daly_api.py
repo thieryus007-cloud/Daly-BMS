@@ -23,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
+from config import BMS_NAMES, BMS_CAPACITY_AH
 from daly_protocol import BmsSnapshot, DalyBusManager, snapshot_to_dict, log_snapshot
 from daly_write import (
     CommandQueue, DalyWriteManager, DalyWriter, WriteResult,
@@ -331,18 +332,13 @@ async def get_config():
     Configuration active — liste des BMS et leurs noms.
     Utilisé par le dashboard pour construire dynamiquement ses vues.
     """
-    active   = state.manager.bms_ids if state.manager else BMS_IDS
-    names    = {bid: os.getenv(f"BMS{bid}_NAME", f"BMS {bid}") for bid in active}
-    capacity = {
-        bid: int(os.getenv(f"BMS{bid}_CAPACITY_AH", os.getenv("DALY_CAPACITY_AH", "320")))
-        for bid in active
-    }
+    active = state.manager.bms_ids if state.manager else BMS_IDS
     return {
         "bms_ids":      active,
-        "bms_names":    names,
+        "bms_names":    {bid: BMS_NAMES.get(bid, f"BMS {bid}") for bid in active},
         "cell_count":   CELL_COUNT,
         "sensor_count": SENSOR_COUNT,
-        "capacity_ah":  capacity,
+        "capacity_ah":  {bid: int(BMS_CAPACITY_AH.get(bid, 320)) for bid in active},
     }
 
 

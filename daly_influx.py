@@ -30,13 +30,7 @@ BATCH_INTERVAL_S  = float(os.getenv("INFLUX_BATCH_INTERVAL", "5.0"))
 RETENTION_DAYS    = int(os.getenv("INFLUX_RETENTION_DAYS", "30"))
 WRITE_INTERVAL    = float(os.getenv("INFLUX_WRITE_INTERVAL", "1.0"))
 
-def _load_bms_names() -> dict[int, str]:
-    """Construit le dict {bms_id: nom} depuis DALY_ADDRESSES + INFLUX_BMS{N}_NAME."""
-    raw = os.getenv("DALY_ADDRESSES", "0x01,0x02")
-    ids = sorted({int(x.strip(), 0) for x in raw.split(",") if x.strip()})
-    return {bid: os.getenv(f"INFLUX_BMS{bid}_NAME", f"bms{bid:02d}") for bid in ids}
-
-BMS_NAMES = _load_bms_names()
+from config import BMS_NAMES
 
 INSTALLATION = os.getenv("INFLUX_INSTALLATION", "santuario")
 
@@ -228,7 +222,10 @@ class InfluxBatchWriter:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        await self._flush()
+        try:
+            await asyncio.wait_for(self._flush(), timeout=10.0)
+        except asyncio.TimeoutError:
+            log.warning("InfluxDB flush timeout à l'arrêt — données partiellement perdues")
         log.info(f"InfluxBatchWriter arrêté — {self._written_total} points écrits, "
                  f"{self._errors_total} erreurs")
 
@@ -267,11 +264,16 @@ class InfluxBatchWriter:
         self._buffer.clear()
         self._last_flush = time.monotonic()
         try:
-            self._api.write(
-                bucket=self._bucket,
-                org=self._org,
-                record=batch,
-                write_precision=WritePrecision.NANOSECONDS,
+            # write_api SYNCHRONOUS est bloquant — on l'exécute dans un thread (I1)
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: self._api.write(
+                    bucket=self._bucket,
+                    org=self._org,
+                    record=batch,
+                    write_precision=WritePrecision.NANOSECONDS,
+                ),
             )
             self._written_total += len(batch)
             log.debug(f"InfluxDB flush : {len(batch)} points → {self._bucket}")

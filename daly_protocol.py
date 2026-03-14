@@ -230,9 +230,9 @@ def _parse_minmax_temp(bms_id: int, raw: bytes) -> MinMaxTemperature:
     return MinMaxTemperature(
         bms_id=bms_id,
         timestamp=time.time(),
-        max_temp=float(max_t),
+        max_temp=round(float(max_t), 1),
         max_sensor_num=max_s,
-        min_temp=float(min_t),
+        min_temp=round(float(min_t), 1),
         min_sensor_num=min_s,
     )
 
@@ -298,7 +298,7 @@ def _parse_temperatures(bms_id: int, frames: list[bytes]) -> Temperatures:
         d = raw[4:12]
         for i in range(1, 8, 1):
             if d[i] != 0:
-                temps.append(float(d[i] - 40))
+                temps.append(round(float(d[i] - 40), 1))
     return Temperatures(bms_id=bms_id, timestamp=time.time(), temps=temps)
 
 def _parse_balance_status(bms_id: int, raw: bytes) -> BalanceStatus:
@@ -864,6 +864,11 @@ def snapshot_to_dict(snap: BmsSnapshot) -> dict:
             "discharge_mos": snap.mos.discharge_mos,
             "bms_cycles": snap.mos.bms_cycles,
             "remaining_capacity": snap.mos.remaining_capacity,
+        })
+    if snap.status:
+        out.update({
+            "n_cells":   snap.status.cell_count,
+            "n_sensors": snap.status.sensor_count,
         })
     if snap.cells:
         for i, v in enumerate(snap.cells.voltages, 1):
