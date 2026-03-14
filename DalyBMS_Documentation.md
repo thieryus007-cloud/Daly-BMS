@@ -82,10 +82,10 @@ DalyBMS Interface est une alternative open-source au logiciel PC Master fourni p
 │  │  BMS 0x02   │    └──────┬───────────┬────────────────────┘   │
 │  │  Pack 360Ah │           │           │                        │
 │  └─────────────┘    ┌──────▼──────┐  ┌▼───────────────────┐   │
-│         │           │ daly_influx │  │   daly_venus.py    │   │
-│  UART/RS485         │  InfluxDB   │  │  Bridge NanoPi     │   │
-│  /dev/ttyUSB1       │  + Grafana  │  │  MQTT → dbus       │   │
-│                     └─────────────┘  └────────────────────┘   │
+│         │           │ daly_influx │                            │
+│  UART/RS485         │  InfluxDB   │                            │
+│  /dev/ttyUSB1       │  + Grafana  │                            │
+│                     └─────────────┘                            │
 │                                                                 │
 │  ┌─────────────────┐   ┌────────────────────────────────────┐  │
 │  │  daly_alerts.py │   │         Nginx :80                  │  │
@@ -198,9 +198,6 @@ sudo ./install.sh status
 # Test port UART
 sudo ./install.sh check-uart
 
-# Test bridge Venus OS
-cd /opt/dalybms
-venv/bin/python daly_venus.py check
 ```
 
 ---
@@ -411,10 +408,6 @@ Moteur d'alertes avec règles configurables, hysteresis, snooze, journal SQLite,
 ### D7 — Interface Web React
 
 SPA React avec 8 pages : Dashboard, Cellules, Températures, Alarmes, Contrôle, Configuration, Dual BMS, Statistiques.
-
-### D9 — daly_venus.py
-
-Bridge MQTT ↔ Venus OS via dbus-mqtt-devices. Traduit les snapshots BMS en paths `com.victronenergy.battery`.
 
 ---
 
@@ -809,28 +802,6 @@ Le RPi CM5 publie les données BMS vers le broker Mosquitto du NanoPi (port 1883
 | `/Alarms/HighVoltage` | 0/1 | cell_ovp ou pack_ovp |
 | `/Alarms/LowVoltage` | 0/1 | cell_uvp ou pack_uvp |
 
-### Découverte du Portal ID
-
-```bash
-# Découverte automatique via MQTT
-cd /opt/dalybms
-venv/bin/python -c "
-import asyncio
-from daly_venus import discover_portal_id
-pid = asyncio.run(discover_portal_id())
-print(f'Portal ID : {pid}')
-"
-```
-
-### Test commissioning
-
-```bash
-cd /opt/dalybms
-venv/bin/python daly_venus.py check
-```
-
-Vérifie la connectivité NanoPi, liste les services dbus actifs, publie un test battery et indique de vérifier dans VRM > Services > battery.
-
 ### Vérification dans Venus OS
 
 Connecter un terminal SSH au NanoPi :
@@ -1003,7 +974,7 @@ Le SmartShunt est la référence SOC authoritative. Le SOC Daly est cosmétique.
 
 ### Irradiance CWT-SI PR-300
 
-Le capteur irradiance est publié vers Venus OS via `com.victronenergy.meteo` (instance 20). Si le NanoPi gère déjà le capteur directement via serial-starter, désactiver la publication meteo dans `daly_venus.py` en mettant `INST_METEO=0`.
+Le capteur irradiance est publié vers Venus OS via `com.victronenergy.meteo` (instance 20). Si le NanoPi gère déjà le capteur directement via serial-starter, la publication meteo peut être désactivée côté driver dbus-mqtt-battery.
 
 ---
 
@@ -1064,10 +1035,6 @@ from(bucket:"daly_bms")
 ```bash
 # Vérifier la connexion broker NanoPi
 mosquitto_pub -h 192.168.1.120 -t test/ping -m ping
-
-# Vérifier le portal ID
-cd /opt/dalybms
-venv/bin/python daly_venus.py check
 
 # Sur NanoPi — vérifier dbus
 ssh root@192.168.1.120
@@ -1155,9 +1122,8 @@ Exécuter dans l'ordre lors de la réception du kit :
 [ ] 7. sudo systemctl start dalybms.target
 [ ] 8. curl http://localhost:8000/api/v1/system/status
 [ ] 9. Vérifier Grafana http://localhost:3000
-[10] 10. venv/bin/python daly_venus.py check
-[11] 11. Vérifier Venus OS : Services > battery/10 et battery/11
-[12] 12. Tester alerte Telegram (déclencher manuellement via snooze=0)
+[10] 10. Vérifier Venus OS : Services > battery/10 et battery/11
+[11] 11. Tester alerte Telegram (déclencher manuellement via snooze=0)
 ```
 
 ---

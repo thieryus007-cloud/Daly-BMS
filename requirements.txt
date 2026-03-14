@@ -14,7 +14,7 @@ pydantic>=2.0.0                # validation des modèles API
 python-multipart>=0.0.9        # upload de fichiers (endpoints FastAPI)
 
 # --- MQTT ---
-aiomqtt>=2.0.0                 # client MQTT async (daly_mqtt.py, daly_venus.py)
+aiomqtt>=2.0.0                 # client MQTT async (daly_mqtt.py)
 
 # --- InfluxDB 2.x ---
 influxdb-client[async]>=1.40.0 # écriture time-series (daly_influx.py)
