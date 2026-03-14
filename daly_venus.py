@@ -1,5 +1,24 @@
 """
-daly_venus.py — D9 : Bridge MQTT ↔ Venus OS / NanoPi
+daly_venus.py — D9 : Bridge MQTT ↔ Venus OS / NanoPi  [DÉPRÉCIÉ]
+
+⚠  Ce module est déprécié depuis l'installation de dbus-mqtt-battery (mr-manuel)
+   sur le NanoPi. Il n'est plus lancé par défaut.
+
+   Approche remplacée par :
+     - daly_mqtt.py  : publie {MQTT_PREFIX}/{bms_id}/venus (JSON complet)
+     - NanoPi        : dbus-mqtt-battery-41/42 subscribe à ce topic
+                       et expose com.victronenergy.battery sur le D-Bus local
+
+   Avantages de la nouvelle approche :
+     - Meilleure visibilité VRM (graphiques, historique, alarmes Victron)
+     - DVCC : l'MPPT respecte les limites CCL/CVL transmises
+     - Time-To-Go calculé par le driver
+     - Keepalive géré côté driver, pas dans notre code
+     - Maintenance réduite (driver communautaire maintenu)
+
+   Ce fichier est conservé pour référence. Ne pas activer en production
+   simultanément avec dbus-mqtt-battery (instances D-Bus conflictuelles).
+
 Publication des données BMS Daly vers Venus OS via dbus-mqtt-devices.
 Services virtuels dbus : com.victronenergy.battery (×2), com.victronenergy.meteo.
 Abonné MQTT du NanoPi (port 1883) — RPi CM5 = satellite pur, NanoPi = GX master.
