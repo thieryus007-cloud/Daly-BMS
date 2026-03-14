@@ -27,6 +27,7 @@ const getBmsName = id => BMS_NAMES[id] || `BMS ${id}`;
 // ─── Mock data (état initial avant connexion WS) ──────────────────────────────
 function generateSnapshot(bmsId, t = Date.now()) {
   const base = 320;  // capacité générique pour le mock
+  const soc  = +(50 + Math.sin(t / 10000 + bmsId) * 20).toFixed(1);
   const cells = Array.from({ length: 16 }, (_, i) => {
     const v = 3310 + Math.sin(t / 5000 + i) * 15
       + (i === 7 ? 45 : 0) + (i === 15 ? 38 : 0);
@@ -1070,7 +1071,7 @@ function PageControl({ data }) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // PAGE 6 — CONFIGURATION
 // ═══════════════════════════════════════════════════════════════════════════════
-function PageConfig() {
+function PageConfig({ data }) {
   const [sel, setSel] = useState(1);
   const [group, setGroup] = useState("protection_v");
   const [saved, setSaved] = useState(false);
@@ -1495,7 +1496,7 @@ export default function App() {
     temperatures: <PageTemperatures data={data} history={history}/>,
     alarms:       <PageAlarms       data={data}/>,
     control:      <PageControl      data={data}/>,
-    config:       <PageConfig/>,
+    config:       <PageConfig       data={data}/>,
     dual:         <PageDual         data={data}/>,
     stats:        <PageStats        data={data} history={history}/>,
   };
