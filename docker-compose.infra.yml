@@ -1,0 +1,113 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# DalyBMS — Infrastructure Docker (Phase 1)
+# Services : Mosquitto · InfluxDB · Grafana · Node-RED
+#
+# Usage :
+#   cp .env.docker.example .env.docker   # puis éditer les credentials
+#   make up                              # démarrer
+#   make logs                            # suivre les logs
+#   make down                            # arrêter
+#
+# Les ports sont exposés sur l'hôte → les scripts Python natifs se connectent
+# sans modification : localhost:1883, localhost:8086, etc.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Mosquitto — MQTT broker ─────────────────────────────────────────────────
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: dalybms_mosquitto
+    restart: unless-stopped
+    ports:
+      - "1883:1883"   # MQTT (daly_mqtt.py → localhost:1883)
+      - "9001:9001"   # MQTT over WebSocket (Node-RED, clients web)
+    volumes:
+      - ./docker/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+    networks: [infra]
+    healthcheck:
+      test: ["CMD", "mosquitto_pub", "-h", "localhost", "-t", "healthcheck", "-m", "ping", "-q"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── InfluxDB 2.x — Time-series ──────────────────────────────────────────────
+  influxdb:
+    image: influxdb:2.7
+    container_name: dalybms_influxdb
+    restart: unless-stopped
+    ports:
+      - "8086:8086"   # HTTP API (daly_influx.py → localhost:8086)
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE:           setup
+      DOCKER_INFLUXDB_INIT_USERNAME:       ${INFLUX_ADMIN_USER}
+      DOCKER_INFLUXDB_INIT_PASSWORD:       ${INFLUX_ADMIN_PASSWORD}
+      DOCKER_INFLUXDB_INIT_ORG:            ${INFLUX_ORG}
+      DOCKER_INFLUXDB_INIT_BUCKET:         ${INFLUX_BUCKET}
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN:    ${INFLUX_TOKEN}
+      DOCKER_INFLUXDB_INIT_RETENTION:      ${INFLUX_RETENTION_DAYS:-30}d
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+      - influxdb_config:/etc/influxdb2
+    networks: [infra]
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── Grafana — Visualisation ─────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: dalybms_grafana
+    restart: unless-stopped
+    ports:
+      - "3001:3000"   # UI Grafana (port 3001 — 3000 réservé au dev Vite)
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    environment:
+      GF_SECURITY_ADMIN_USER:          ${GRAFANA_USER}
+      GF_SECURITY_ADMIN_PASSWORD:      ${GRAFANA_PASSWORD}
+      GF_PATHS_PROVISIONING:           /etc/grafana/provisioning
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/daly_bms.json
+      # Variables transmises au provisioning datasource
+      INFLUX_TOKEN:                    ${INFLUX_TOKEN}
+      INFLUX_ORG:                      ${INFLUX_ORG}
+      INFLUX_BUCKET:                   ${INFLUX_BUCKET}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./daly_bms_grafana.json:/var/lib/grafana/dashboards/daly_bms.json:ro
+    networks: [infra]
+
+  # ── Node-RED — Automatisation & flows ───────────────────────────────────────
+  nodered:
+    image: nodered/node-red:4
+    container_name: dalybms_nodered
+    restart: unless-stopped
+    ports:
+      - "1880:1880"   # UI Node-RED
+    depends_on: [mosquitto, influxdb]
+    environment:
+      TZ: Europe/Paris
+    volumes:
+      - nodered_data:/data
+    networks: [infra]
+
+# ── Réseau interne (Grafana→InfluxDB, Node-RED→Mosquitto, etc.) ───────────────
+networks:
+  infra:
+    name: dalybms_infra
+
+# ── Volumes persistants ───────────────────────────────────────────────────────
+volumes:
+  mosquitto_data:
+  mosquitto_log:
+  influxdb_data:
+  influxdb_config:
+  grafana_data:
+  nodered_data:

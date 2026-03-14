@@ -1,0 +1,13 @@
+# ── Grafana — Dashboard provider (auto-provisionné) ──────────────────────────
+# Charge automatiquement daly_bms_grafana.json depuis /var/lib/grafana/dashboards/
+
+apiVersion: 1
+
+providers:
+  - name: DalyBMS
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
