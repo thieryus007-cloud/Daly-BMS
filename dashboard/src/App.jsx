@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import ReactECharts from "echarts-for-react";
 
 // ─── Palette & constantes ─────────────────────────────────────────────────────
 const C = {
@@ -303,61 +304,130 @@ function SocGauge({ soc, size = 160 }) {
   );
 }
 
-// ─── SVG Range Chart cellules ─────────────────────────────────────────────────
-function CellRangeChart({ voltages = [], highlight = [7, 15] }) {
-  const W = 520, H = 140;
-  const PAD = { l: 40, r: 8, t: 8, b: 24 };
-  const n   = voltages.length;
-  if (!n) return null;
-  const vMin = 3000, vMax = 3600;
-  const barW  = (W - PAD.l - PAD.r) / n - 2;
-  const yScale = v => PAD.t + (H - PAD.t - PAD.b) * (1 - (v - vMin) / (vMax - vMin));
-  const yLines = [3000, 3100, 3200, 3300, 3400, 3500, 3600];
+// ─── ECharts Boxplot cellules ─────────────────────────────────────────────────
+// Calcule [min, Q1, médiane, Q3, max] depuis un tableau de valeurs
+function computeBox(arr) {
+  if (!arr.length) return [0, 0, 0, 0, 0];
+  const s = [...arr].sort((a, b) => a - b);
+  const n = s.length;
+  const q = p => {
+    const idx = p * (n - 1);
+    const lo  = Math.floor(idx);
+    return lo >= n - 1 ? s[n - 1] : s[lo] + (idx - lo) * (s[lo + 1] - s[lo]);
+  };
+  return [s[0], q(0.25), q(0.5), q(0.75), s[n - 1]];
+}
+
+function CellBoxplotChart({ voltages = [], history = [], highlight = [7, 15] }) {
+  const n = 16;
+
+  // Pour chaque cellule : historique + valeur courante comme fallback
+  const boxData = Array.from({ length: n }, (_, i) => {
+    const series = history.map(h => h.cell_voltages?.[i]).filter(v => v != null && v > 0);
+    if (series.length < 2) return { value: computeBox([voltages[i] || 0, voltages[i] || 0]) };
+    const box = computeBox(series);
+    const isHL = highlight.includes(i);
+    return {
+      value: box,
+      itemStyle: {
+        color:       (isHL ? C.red    : C.primary) + "22",
+        borderColor: (isHL ? C.red    : C.primary),
+        borderWidth: isHL ? 2 : 1,
+      },
+    };
+  });
+
+  // Points aberrants : valeurs hors [Q1-1.5*IQR, Q3+1.5*IQR]
+  const outliers = [];
+  boxData.forEach(({ value: [mn, q1, , q3] }, i) => {
+    const iqr = q3 - q1;
+    const lo  = q1 - 1.5 * iqr, hi = q3 + 1.5 * iqr;
+    const series = history.map(h => h.cell_voltages?.[i]).filter(v => v != null && v > 0);
+    series.forEach(v => { if (v < lo || v > hi) outliers.push([i, v]); });
+  });
+
+  // Ligne valeur actuelle (scatter)
+  const currentPoints = voltages.map((v, i) => ({
+    value: [i, v],
+    symbolSize: 6,
+    itemStyle: { color: highlight.includes(i) ? C.red : C.accent },
+  }));
+
+  const option = {
+    backgroundColor: "transparent",
+    animation: false,
+    grid: { top: 16, right: 12, bottom: 28, left: 52 },
+    xAxis: {
+      type: "category",
+      data: Array.from({ length: n }, (_, i) => `#${i + 1}`),
+      axisLine:  { lineStyle: { color: C.border } },
+      axisTick:  { lineStyle: { color: C.border } },
+      axisLabel: { color: C.textMuted, fontFamily: "'Space Mono', monospace", fontSize: 9 },
+    },
+    yAxis: {
+      type:  "value",
+      min:   3100,
+      max:   3550,
+      axisLabel: {
+        color: C.textMuted, fontFamily: "'Space Mono', monospace", fontSize: 9,
+        formatter: v => (v / 1000).toFixed(2),
+      },
+      splitLine: { lineStyle: { color: C.border, opacity: 0.4 } },
+      axisLine:  { show: false },
+      axisTick:  { show: false },
+    },
+    tooltip: {
+      trigger: "item",
+      backgroundColor: C.bgCard,
+      borderColor: C.border,
+      textStyle: { color: C.text, fontFamily: "'Space Mono', monospace", fontSize: 11 },
+      formatter: p => {
+        if (p.seriesType === "boxplot") {
+          const [mn, q1, med, q3, mx] = p.value;
+          return `<b>Cellule ${p.name}</b><br/>
+            Max: ${(mx/1000).toFixed(3)}V<br/>
+            Q3: ${(q3/1000).toFixed(3)}V<br/>
+            Médiane: ${(med/1000).toFixed(3)}V<br/>
+            Q1: ${(q1/1000).toFixed(3)}V<br/>
+            Min: ${(mn/1000).toFixed(3)}V`;
+        }
+        if (p.seriesName === "Actuel") {
+          return `<b>Cellule ${p.name ?? "#" + (p.value[0]+1)}</b><br/>Actuel: ${(p.value[1]/1000).toFixed(3)}V`;
+        }
+        return `Aberrant: ${(p.value[1]/1000).toFixed(3)}V`;
+      },
+    },
+    series: [
+      {
+        name:  "Distribution (historique)",
+        type:  "boxplot",
+        data:  boxData,
+        boxWidth: ["30%", "60%"],
+      },
+      {
+        name:       "Aberrants",
+        type:       "scatter",
+        data:       outliers,
+        symbolSize: 4,
+        itemStyle:  { color: C.orange, opacity: 0.7 },
+      },
+      {
+        name:       "Actuel",
+        type:       "scatter",
+        data:       currentPoints,
+        symbol:     "diamond",
+        symbolSize: 7,
+        z:          10,
+      },
+    ],
+  };
 
   return (
-    <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ overflow: "visible" }}>
-      {/* Grid lines */}
-      {yLines.map(v => (
-        <g key={v}>
-          <line x1={PAD.l} x2={W - PAD.r} y1={yScale(v)} y2={yScale(v)}
-            stroke={C.border} strokeWidth={0.5}/>
-          <text x={PAD.l - 4} y={yScale(v) + 4} textAnchor="end"
-            fill={C.textMuted} fontSize={7} fontFamily="'Space Mono', monospace">
-            {(v/1000).toFixed(1)}
-          </text>
-        </g>
-      ))}
-      {/* Bars */}
-      {voltages.map((v, i) => {
-        const isHL  = highlight.includes(i);
-        const isMax = v === Math.max(...voltages);
-        const isMin = v === Math.min(...voltages);
-        const color = isHL ? C.red : isMax ? C.orange : isMin ? C.yellow : C.primary;
-        const x     = PAD.l + i * ((W - PAD.l - PAD.r) / n);
-        const y     = yScale(v);
-        const bh    = H - PAD.b - y;
-        return (
-          <g key={i}>
-            <rect x={x + 1} y={y} width={barW} height={bh}
-              fill={color + "33"} stroke={color} strokeWidth={1} rx={2}/>
-            <text x={x + barW/2 + 1} y={H - PAD.b + 10}
-              textAnchor="middle" fill={C.textMuted} fontSize={7}
-              fontFamily="'Space Mono', monospace">
-              {i + 1}
-            </text>
-          </g>
-        );
-      })}
-      {/* Average line */}
-      {voltages.length > 0 && (() => {
-        const avg = voltages.reduce((a,b)=>a+b,0)/voltages.length;
-        const y   = yScale(avg);
-        return (
-          <line x1={PAD.l} x2={W - PAD.r} y1={y} y2={y}
-            stroke={C.accent} strokeWidth={1} strokeDasharray="4 3" opacity={0.6}/>
-        );
-      })()}
-    </svg>
+    <ReactECharts
+      option={option}
+      style={{ height: 200, width: "100%" }}
+      opts={{ renderer: "svg" }}
+    />
   );
 }
 
@@ -667,19 +737,16 @@ function PageCells({ data, history }) {
             </div>
           </Card>
 
-          {/* SVG Range Chart */}
+          {/* ECharts Boxplot */}
           <Card>
-            <Label>Range Chart — 3.000V à 3.600V (cellules #8 et #16 en rouge)</Label>
-            <div style={{ marginTop: 10 }}>
-              <CellRangeChart voltages={cells} highlight={[7, 15]}/>
-            </div>
-            <div style={{ display: "flex", gap: 16, marginTop: 8 }}>
+            <Label>Distribution tensions — boxplot historique (cellules #8 et #16 en rouge)</Label>
+            <CellBoxplotChart voltages={cells} history={hist} highlight={[7, 15]}/>
+            <div style={{ display: "flex", gap: 16, marginTop: 4 }}>
               {[
-                { color: C.red,     label: "Cellules surveillées (#8, #16)" },
-                { color: C.orange,  label: "Maximum" },
-                { color: C.yellow,  label: "Minimum" },
-                { color: C.primary, label: "Normal" },
-                { color: C.accent,  label: "Moyenne" },
+                { color: C.red,    label: "Cellules surveillées (#8, #16)" },
+                { color: C.primary,label: "Distribution (Q1–Q3)" },
+                { color: C.orange, label: "Aberrants" },
+                { color: C.accent, label: "Valeur actuelle" },
               ].map(({ color, label }) => (
                 <div key={label} style={{ display: "flex", alignItems: "center", gap: 5 }}>
                   <div style={{ width: 10, height: 10, background: color, borderRadius: 2 }}/>
