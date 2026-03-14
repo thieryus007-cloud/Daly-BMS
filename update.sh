@@ -73,7 +73,6 @@ PYTHON_FILES=(
     daly_mqtt.py
     daly_influx.py
     daly_alerts.py
-    daly_venus.py
 )
 
 UPDATED=0
@@ -168,7 +167,7 @@ sleep 5
 
 # Vérification état
 ALL_OK=true
-for SVC in dalybms-api dalybms-mqtt dalybms-influx dalybms-alerts dalybms-venus; do
+for SVC in dalybms-api dalybms-mqtt dalybms-influx dalybms-alerts; do
     if systemctl is-active --quiet "$SVC" 2>/dev/null; then
         log "  ✔ ${SVC} : actif"
     else

@@ -54,7 +54,6 @@ Pack D (BMS 0x04) ──┘      [natif]                 │          [natif]
 | `daly_mqtt.py` | Publication MQTT vers Mosquitto |
 | `daly_influx.py` | Écriture InfluxDB 2.x avec batch et downsampling 1min |
 | `daly_alerts.py` | Moteur d'alertes — hysteresis, journal SQLite, notifications |
-| `daly_venus.py` | Bridge Venus OS — republication MQTT vers dbus-mqtt-devices |
 | `dashboard/` | SPA React — monitoring temps réel via WebSocket |
 
 ### Flux de données
@@ -693,7 +692,6 @@ Daly-BMS/
 ├── daly_mqtt.py              # D4 — Publication MQTT
 ├── daly_influx.py            # D5 — Écriture InfluxDB
 ├── daly_alerts.py            # D6 — Moteur d'alertes
-├── daly_venus.py             # D7 — Bridge Venus OS
 ├── dashboard/
 │   ├── src/
 │   │   ├── App.jsx           # SPA React — 8 pages de monitoring

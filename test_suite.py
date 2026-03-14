@@ -713,120 +713,7 @@ class TestDalyAlerts:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# BLOC 7 — Venus OS Bridge (daly_venus.py)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class TestDalyVenus:
-    """Tests du bridge Venus OS — MQTT NanoPi mocké."""
-
-    def test_build_battery_paths_required_keys(self):
-        """build_battery_paths() retourne tous les paths obligatoires Venus OS."""
-        from daly_venus import build_battery_paths
-        snap  = _make_snapshot(1, soc=72.0)
-        paths = build_battery_paths(snap, capacity_ah=320,
-                                    product_name="Daly LiFePO4 320Ah")
-        required_paths = [
-            "/Dc/0/Voltage", "/Dc/0/Current", "/Dc/0/Power",
-            "/Soc", "/Capacity",
-            "/Info/MaxChargeCurrent", "/Info/MaxDischargeCurrent",
-            "/Info/MaxChargeVoltage", "/Info/BatteryLowVoltage",
-            "/Io/AllowToCharge", "/Io/AllowToDischarge",
-            "/System/MinCellVoltage", "/System/MaxCellVoltage",
-            "/Alarms/Alarm", "/Alarms/LowVoltage", "/Alarms/HighVoltage",
-            "/Connected", "/ProductName",
-        ]
-        for p in required_paths:
-            assert p in paths, f"Path Venus OS manquant : {p}"
-
-    def test_mos_off_sets_ccl_zero(self):
-        """CHG MOS OFF → MaxChargeCurrent = 0."""
-        from daly_venus import build_battery_paths
-        snap = _make_snapshot(1)
-        snap["charge_mos"] = False
-        paths = build_battery_paths(snap, 320, "Test")
-        assert paths["/Info/MaxChargeCurrent"] == 0.0
-        assert paths["/Io/AllowToCharge"] == 0
-
-    def test_mos_on_sets_ccl_positive(self):
-        """CHG MOS ON → MaxChargeCurrent > 0."""
-        from daly_venus import build_battery_paths
-        snap  = _make_snapshot(1)
-        snap["charge_mos"] = True
-        paths = build_battery_paths(snap, 320, "Test")
-        assert paths["/Info/MaxChargeCurrent"] > 0
-        assert paths["/Io/AllowToCharge"] == 1
-
-    def test_cvl_matches_16s_config(self):
-        """CVL = 3.55V × 16 = 56.8V pour configuration 16S."""
-        from daly_venus import build_battery_paths
-        snap  = _make_snapshot(1)
-        paths = build_battery_paths(snap, 320, "Test")
-        cvl   = paths["/Info/MaxChargeVoltage"]
-        assert abs(cvl - 56.8) < 0.1, f"CVL attendu 56.8V, obtenu {cvl}V"
-
-    def test_uvp_pack_matches_16s(self):
-        """UVP pack = 2.80V × 16 = 44.8V."""
-        from daly_venus import build_battery_paths
-        snap  = _make_snapshot(1)
-        paths = build_battery_paths(snap, 320, "Test")
-        uvp   = paths["/Info/BatteryLowVoltage"]
-        assert abs(uvp - 44.8) < 0.1, f"UVP attendu 44.8V, obtenu {uvp}V"
-
-    def test_alarm_high_voltage_flag(self):
-        """cell_ovp=True → /Alarms/HighVoltage = 1."""
-        from daly_venus import build_battery_paths
-        snap = _make_snapshot(1)
-        snap["alarms"]["cell_ovp"] = True
-        snap["any_alarm"]          = True
-        paths = build_battery_paths(snap, 320, "Test")
-        assert paths["/Alarms/HighVoltage"] == 1
-        assert paths["/Alarms/Alarm"] == 1
-
-    def test_time_to_go_in_discharge(self):
-        """TimeToGo calculé si courant négatif (décharge)."""
-        from daly_venus import build_battery_paths
-        snap = _make_snapshot(1, soc=50.0)
-        snap["pack_current"]      = -10.0   # décharge 10A
-        snap["remaining_capacity"] = 160.0  # 160Ah restants
-        paths = build_battery_paths(snap, 320, "Test")
-        ttg   = paths.get("/TimeToGo")
-        assert ttg is not None
-        assert ttg > 0
-        # 160Ah / 10A = 16h = 57600s
-        assert abs(ttg - 57600) < 600
-
-    def test_time_to_go_none_in_charge(self):
-        """TimeToGo = None si courant positif (charge)."""
-        from daly_venus import build_battery_paths
-        snap = _make_snapshot(1)
-        snap["pack_current"] = +15.0
-        paths = build_battery_paths(snap, 320, "Test")
-        assert paths.get("/TimeToGo") is None
-
-    def test_topic_write_format(self):
-        """Les topics W/ respectent le format dbus-mqtt-devices."""
-        from daly_venus import _W
-        topic = _W("c0619ab9929a", "battery", 10, "Dc/0/Voltage")
-        assert topic == "W/c0619ab9929a/battery/10/Dc/0/Voltage"
-
-    def test_val_serialization(self):
-        """_val() sérialise en JSON {"value": x}."""
-        from daly_venus import _val
-        assert json.loads(_val(53.2)) == {"value": 53.2}
-        assert json.loads(_val(None)) == {"value": None}
-        assert json.loads(_val("ON")) == {"value": "ON"}
-
-    def test_meteo_paths_irradiance(self):
-        """build_meteo_paths() inclut /Irradiance."""
-        from daly_venus import build_meteo_paths
-        paths = build_meteo_paths(irradiance_wm2=650.5)
-        assert "/Irradiance" in paths
-        assert abs(paths["/Irradiance"] - 650.5) < 0.1
-        assert paths["/Connected"] == 1
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# BLOC 8 — TESTS D'INTÉGRATION (offline — broker Mosquitto local requis)
+# BLOC 7 — TESTS D'INTÉGRATION (offline — broker Mosquitto local requis)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @pytest.mark.integration
@@ -1065,19 +952,6 @@ class TestHardwareUART:
             assert cell8  > 0, "Cellule #8 : tension nulle"
             assert cell16 > 0, "Cellule #16 : tension nulle"
 
-    @pytest.mark.asyncio
-    async def test_venus_bridge_reaches_nanopi(self):
-        """Venus Bridge se connecte au broker NanoPi."""
-        import aiomqtt, os
-        host = os.getenv("NANOPI_MQTT_HOST", "192.168.1.120")
-        try:
-            async with aiomqtt.Client(host, 1883,
-                                      identifier="test-venus-ping",
-                                      keepalive=5) as client:
-                await client.publish("test/dalybms/ping", b"ping", qos=0)
-        except Exception as e:
-            pytest.fail(f"NanoPi MQTT inaccessible ({host}:1883) : {e}")
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # BLOC 10 — TESTS DE RÉGRESSION (valeurs connues installation Santuario)
@@ -1120,22 +994,10 @@ class TestRegression:
         assert ADDR_BMS_320AH == 0x01
         assert ADDR_BMS_360AH == 0x02
 
-    def test_venus_instance_ids(self):
-        """Instances Venus OS : BMS1=10, BMS2=11, Meteo=20."""
-        from daly_venus import INST_BMS1, INST_BMS2, INST_METEO
-        assert INST_BMS1  == 10
-        assert INST_BMS2  == 11
-        assert INST_METEO == 20
-
     def test_influx_retention_30_days(self):
         """Rétention InfluxDB full-res : 30 jours."""
         from daly_influx import INFLUX_RETENTION_DAYS
         assert INFLUX_RETENTION_DAYS == 30
-
-    def test_portal_id_santuario(self):
-        """Portal ID VRM connu : c0619ab9929a."""
-        from daly_venus import PORTAL_ID
-        assert PORTAL_ID == "c0619ab9929a"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

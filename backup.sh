@@ -157,7 +157,7 @@ fi
 
 # ── 5. Logs récents ───────────────────────────────────────────────────────────
 log "Export logs récents (48h)..."
-for SVC in api mqtt influx alerts venus; do
+for SVC in api mqtt influx alerts; do
     journalctl -u "dalybms-${SVC}" \
         --since "48 hours ago" \
         --no-pager \

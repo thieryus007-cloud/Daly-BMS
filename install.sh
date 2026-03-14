@@ -212,7 +212,6 @@ install_sources() {
         daly_mqtt.py
         daly_influx.py
         daly_alerts.py
-        daly_venus.py
     )
     MISSING=()
     for mod in "${MODULES[@]}"; do
@@ -285,21 +284,11 @@ MQTT_QOS_DATA=0
 MQTT_QOS_ALARM=1
 MQTT_INTERVAL=5.0
 
-# ── MQTT Bridge (republication topics vers NanoPi, indépendant de daly_venus.py) ─
+# ── MQTT Bridge (republication topics vers NanoPi) ───────────────────────────
 MQTT_BRIDGE_ENABLED=false
 MQTT_BRIDGE_HOST=192.168.1.120
 MQTT_BRIDGE_PORT=1883
 MQTT_BRIDGE_PREFIX=santuario/bms
-
-# ── MQTT NanoPi (Venus OS bridge) ────────────────────────────────────────────
-NANOPI_MQTT_HOST=192.168.1.120
-NANOPI_MQTT_PORT=1883
-NANOPI_CLIENT_ID=dalybms-venus-bridge
-VENUS_PORTAL_ID=c0619ab9929a
-VENUS_BMS1_INSTANCE=10
-VENUS_BMS2_INSTANCE=11
-VENUS_METEO_INSTANCE=20
-VENUS_PUBLISH_INTERVAL=5.0
 
 # ── InfluxDB ─────────────────────────────────────────────────────────────────
 INFLUX_URL=http://localhost:8086
@@ -540,42 +529,12 @@ WantedBy=multi-user.target
 EOF
     log_info "  dalybms-alerts.service"
 
-    # ── 7.5 dalybms-venus.service ────────────────────────────────────────────
-    cat > /etc/systemd/system/dalybms-venus.service <<EOF
-[Unit]
-Description=DalyBMS Venus OS Bridge (MQTT → dbus-mqtt-devices)
-After=network.target mosquitto.service
-Wants=mosquitto.service
-
-[Service]
-Type=simple
-User=${USER}
-Group=${GROUP}
-WorkingDirectory=${INSTALL_DIR}
-EnvironmentFile=${ENV_FILE}
-ExecStart=${VENV_DIR}/bin/python daly_venus.py
-Restart=on-failure
-RestartSec=15
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=dalybms-venus
-
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    log_info "  dalybms-venus.service"
-
-    # ── 7.6 dalybms.target (groupe) ──────────────────────────────────────────
+    # ── 7.5 dalybms.target (groupe) ──────────────────────────────────────────
     cat > /etc/systemd/system/dalybms.target <<EOF
 [Unit]
 Description=DalyBMS Interface — Tous les services
 After=network.target
-Wants=dalybms-api.service dalybms-mqtt.service dalybms-influx.service dalybms-alerts.service dalybms-venus.service
+Wants=dalybms-api.service dalybms-mqtt.service dalybms-influx.service dalybms-alerts.service
 
 [Install]
 WantedBy=multi-user.target
@@ -787,9 +746,7 @@ enable_services() {
 
     # Services core — démarrent automatiquement
     systemctl enable dalybms-api
-    systemctl enable dalybms-venus
     log_info "  Activé : dalybms-api (inclut AlertBridge + bridges MQTT/Influx si configurés)"
-    log_info "  Activé : dalybms-venus"
 
     # Services standalone (désactivés par défaut — bridges intégrés dans dalybms-api)
     # Activer manuellement si déploiement multi-processus souhaité :
@@ -835,16 +792,13 @@ print_summary() {
     echo -e "     Grafana   : ${CYAN}http://dalybms.local/grafana/${NC}"
     echo -e "     InfluxDB  : ${CYAN}http://dalybms.local:8086${NC}"
     echo
-    echo -e "  6. Venus OS Bridge — vérification :"
-    echo -e "     ${BOLD}cd $INSTALL_DIR && ${VENV_DIR}/bin/python daly_venus.py check${NC}"
-    echo
     echo -e "${BOLD}${GREEN}════════════════════════════════════════════════════${NC}"
 }
 
 # ─── Désinstallation ─────────────────────────────────────────────────────────
 uninstall() {
     log_step "Désinstallation DalyBMS"
-    SERVICES=(dalybms-api dalybms-mqtt dalybms-influx dalybms-alerts dalybms-venus)
+    SERVICES=(dalybms-api dalybms-mqtt dalybms-influx dalybms-alerts)
     for svc in "${SERVICES[@]}"; do
         systemctl stop    "$svc" 2>/dev/null || true
         systemctl disable "$svc" 2>/dev/null || true
@@ -909,7 +863,7 @@ main() {
             log_ok "Mise à jour terminée"
             ;;
         status)
-            for svc in dalybms-api dalybms-mqtt dalybms-influx dalybms-alerts dalybms-venus; do
+            for svc in dalybms-api dalybms-mqtt dalybms-influx dalybms-alerts; do
                 echo -e "${CYAN}── $svc${NC}"
                 systemctl status "$svc" --no-pager -l 2>/dev/null | tail -5 || true
             done
