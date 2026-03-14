@@ -736,4 +736,4 @@ Daly-BMS/
 
 ---
 
-*Installation Santuario — Badalucco (Ligurie) — Système photovoltaïque autonome*
+*Installation Santuario — Système photovoltaïque autonome*
