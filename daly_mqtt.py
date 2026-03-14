@@ -46,10 +46,7 @@ BMS_CAPACITY_AH  = {
     1: float(os.getenv("BMS1_CAPACITY_AH", "320")),
     2: float(os.getenv("BMS2_CAPACITY_AH", "360")),
 }
-VENUS_CVL_V_CELL = float(os.getenv("VENUS_CVL_V_CELL", "3.55"))   # Charge Voltage Limit par cellule
-VENUS_CCL_A      = float(os.getenv("VENUS_CCL_A",      "70.0"))   # Charge Current Limit
-VENUS_DCL_A      = float(os.getenv("VENUS_DCL_A",     "100.0"))   # Discharge Current Limit
-VENUS_SOC_LOW    = float(os.getenv("VENUS_SOC_LOW",    "20.0"))   # Seuil SOC low alarm
+VENUS_SOC_LOW    = float(os.getenv("VENUS_SOC_LOW", "20.0"))   # Seuil SOC low alarm (%)
 
 # Noms des BMS pour les topics — dynamique selon DALY_ADDRESSES
 def _load_bms_names() -> dict[int, str]:
@@ -163,12 +160,15 @@ def _status_payload(snap: dict) -> str:
 
 def build_venus_payload(snap: dict, bms_id: int) -> str:
     """
-    Construit le payload JSON attendu par dbus-mqtt-battery (mr-manuel).
+    Construit le payload JSON le plus complet possible pour dbus-mqtt-battery (mr-manuel).
     Référence : https://github.com/mr-manuel/venus-os_dbus-mqtt-battery
 
     Le driver tourne sur le NanoPi et subscribe à {prefix}/{bms_id}/venus.
     Il expose ensuite com.victronenergy.battery sur le D-Bus Venus OS,
-    ce qui rend la batterie visible dans VRM avec graphiques, alarmes et DVCC.
+    ce qui rend la batterie visible dans VRM avec graphiques, alarmes et historique.
+
+    DVCC désactivé au niveau Venus OS → section Info non envoyée.
+    Sévérité alarmes Victron : 0 = ok, 1 = warning, 2 = alarm.
     """
     soc      = snap.get("soc", 0)
     volt     = snap.get("pack_voltage", 0.0)
@@ -183,74 +183,101 @@ def build_venus_payload(snap: dict, bms_id: int) -> str:
     dsg_mos  = snap.get("discharge_mos", True)
     cell_min = (snap.get("cell_min_v") or 0) / 1000.0   # mV → V
     cell_max = (snap.get("cell_max_v") or 0) / 1000.0
+    cell_min_num = snap.get("cell_min_num", 0)
+    cell_max_num = snap.get("cell_max_num", 0)
     alarms   = snap.get("alarms", {})
+    bal_mask = snap.get("balancing_mask", [])
 
-    # Limites DVCC (communiquées à l'MPPT via Venus OS)
-    cvl  = round(VENUS_CVL_V_CELL * n_cells, 2)         # ex. 3.55 × 16 = 56.8 V
-    ccl  = VENUS_CCL_A if chg_mos else 0.0
-    dcl  = VENUS_DCL_A if dsg_mos else 0.0
-    uvp  = round(2.80 * n_cells, 2)                     # ex. 2.80 × 16 = 44.8 V
+    # Tensions individuelles des cellules (mV → V)
+    cell_v = {
+        f"Cell{i}": round((snap.get(f"cell_{i:02d}") or 0) / 1000.0, 4)
+        for i in range(1, n_cells + 1)
+    }
+
+    # État balancing par cellule
+    cell_bal = {
+        f"Cell{i}": int(bal_mask[i - 1]) if i - 1 < len(bal_mask) else 0
+        for i in range(1, n_cells + 1)
+    }
+
+    # Time-To-Go (s) — calculé uniquement en décharge
+    ttg = None
+    if curr < -0.5 and cap_rem > 0:
+        ttg = int((cap_rem / abs(curr)) * 3600)
+
+    # Sévérité alarmes Victron : 0=ok, 1=warning, 2=alarm
+    def _alv(key: str, severity: int = 2) -> int:
+        return severity if alarms.get(key) else 0
 
     payload = {
+        # ── Mesures DC ──────────────────────────────────────────────────────────
         "Dc": {
             "Power":       round(power, 1),
             "Voltage":     round(volt, 3),
             "Current":     round(curr, 2),
             "Temperature": round(temp_max, 1),
         },
-        "Soc":              round(soc, 1),
-        "Capacity":         round(cap_rem, 2),
+
+        # ── SOC & énergie ────────────────────────────────────────────────────────
+        "Soc":               round(soc, 1),
+        "Capacity":          round(cap_rem, 2),
         "InstalledCapacity": cap_nom,
-        "ConsumedAmphours": round(max(0.0, cap_nom - cap_rem), 2),
-        "Balancing":        1 if any(snap.get("balancing_mask", [])) else 0,
-        "SystemSwitch":     1,
+        "ConsumedAmphours":  round(max(0.0, cap_nom - cap_rem), 2),
+        "TimeToGo":          ttg,
+        "Balancing":         1 if any(bal_mask) else 0,
+        "SystemSwitch":      1,
 
-        # Limites charger — transmises à l'MPPT via DVCC
-        "Info": {
-            "MaxChargeVoltage":    cvl,
-            "MaxChargeCurrent":    ccl,
-            "MaxDischargeCurrent": dcl,
-            "MaxChargeCellVoltage": VENUS_CVL_V_CELL,
-            "BatteryLowVoltage":   uvp,
-        },
-
-        # État système et cellules
+        # ── État système & cellules ──────────────────────────────────────────────
         "System": {
-            "NrOfCellsPerBattery":  n_cells,
-            "NrOfModulesOnline":    1,
-            "NrOfModulesOffline":   0,
-            "MinCellVoltage":       round(cell_min, 4),
-            "MaxCellVoltage":       round(cell_max, 4),
-            "MinCellTemperature":   round(temp_min, 1),
-            "MaxCellTemperature":   round(temp_max, 1),
+            "NrOfCellsPerBattery":       n_cells,
+            "NrOfModulesOnline":         1,
+            "NrOfModulesOffline":        0,
+            "NrOfModulesBlockingCharge":    0 if chg_mos else 1,
+            "NrOfModulesBlockingDischarge": 0 if dsg_mos else 1,
+            "MinCellVoltage":            round(cell_min, 4),
+            "MinVoltageCellId":          cell_min_num,
+            "MaxCellVoltage":            round(cell_max, 4),
+            "MaxVoltageCellId":          cell_max_num,
+            "MinCellTemperature":        round(temp_min, 1),
+            "MaxCellTemperature":        round(temp_max, 1),
         },
 
-        # Permissions MOS
+        # ── Tensions individuelles cellules (V) ──────────────────────────────────
+        "Voltages": cell_v,
+
+        # ── Balancing par cellule ────────────────────────────────────────────────
+        "Balances": cell_bal,
+
+        # ── Permissions ─────────────────────────────────────────────────────────
         "Io": {
             "AllowToCharge":    1 if chg_mos else 0,
             "AllowToDischarge": 1 if dsg_mos else 0,
+            "AllowToBalance":   1,
         },
 
-        # Alarmes (format Victron)
+        # ── Alarmes (0=ok, 1=warning, 2=alarm) ──────────────────────────────────
         "Alarms": {
-            "Alarm":                   1 if snap.get("any_alarm") else 0,
-            "LowVoltage":              1 if alarms.get("cell_uvp") or alarms.get("pack_uvp") else 0,
-            "HighVoltage":             1 if alarms.get("cell_ovp") or alarms.get("pack_ovp") else 0,
-            "LowSoc":                  1 if soc < VENUS_SOC_LOW else 0,
-            "HighChargeCurrent":       1 if alarms.get("chg_ocp") else 0,
-            "HighDischargeCurrent":    1 if alarms.get("dsg_ocp") else 0,
-            "HighCurrent":             1 if alarms.get("scp") else 0,
-            "CellImbalance":           1 if alarms.get("cell_delta") else 0,
-            "HighChargeTemperature":   1 if alarms.get("chg_otp") else 0,
-            "LowChargeTemperature":    0,
-            "HighTemperature":         1 if alarms.get("chg_otp") else 0,
-            "LowTemperature":          0,
-            "FuseBlown":               0,
+            "Alarm":                 2 if snap.get("any_alarm") else 0,
+            "LowVoltage":            _alv("pack_uvp"),
+            "HighVoltage":           _alv("pack_ovp"),
+            "LowCellVoltage":        _alv("cell_uvp"),
+            "HighCellVoltage":       _alv("cell_ovp"),
+            "LowSoc":                1 if soc < VENUS_SOC_LOW else 0,
+            "HighChargeCurrent":     _alv("chg_ocp"),
+            "HighDischargeCurrent":  _alv("dsg_ocp"),
+            "HighCurrent":           _alv("scp"),
+            "CellImbalance":         _alv("cell_delta", severity=1),
+            "HighChargeTemperature": _alv("chg_otp"),
+            "LowChargeTemperature":  0,
+            "HighTemperature":       _alv("chg_otp"),
+            "LowTemperature":        0,
+            "FuseBlown":             0,
         },
 
-        # Historique
+        # ── Historique ───────────────────────────────────────────────────────────
         "History": {
-            "ChargeCycles": snap.get("bms_cycles", 0),
+            "ChargeCycles":   snap.get("bms_cycles", 0),
+            "TotalAhDrawn":   round(max(0.0, cap_nom - cap_rem), 2),
         },
     }
     return json.dumps(payload)
