@@ -15,6 +15,10 @@ from typing import Optional
 # ─── Logging ──────────────────────────────────────────────────────────────────
 log = logging.getLogger("daly.protocol")
 
+
+class FrameError(ValueError):
+    """Trame Daly invalide (start byte, adresse, cmd ou checksum)."""
+
 # ─── Constantes protocole ─────────────────────────────────────────────────────
 START_BYTE      = 0xA5
 HOST_ADDR       = 0x40          # Adresse hôte → BMS
@@ -466,6 +470,27 @@ class DalyPort:
             except asyncio.TimeoutError:
                 pass
 
+    # ── Méthodes utilitaires (accessibles depuis les tests) ───────────────────
+
+    @staticmethod
+    def _build_frame(bms_id: int, cmd: int, data: bytes = bytes(8)) -> bytes:
+        """Construit une trame Daly complète avec checksum (byte[1] = bms_id)."""
+        frame = bytes([START_BYTE, bms_id, cmd, FRAME_DATA_LEN]) + (data or bytes(8))[:8]
+        return frame + bytes([_checksum(frame)])
+
+    @staticmethod
+    def _validate_frame(frame: bytes) -> bool:
+        """Vérifie le checksum d'une trame. Lève FrameError si invalide."""
+        if len(frame) < 5:
+            raise FrameError(f"Trame trop courte : {len(frame)} octets")
+        expected = _checksum(frame[:-1])
+        if frame[-1] != expected:
+            raise FrameError(
+                f"Checksum invalide : reçu 0x{frame[-1]:02X}, "
+                f"attendu 0x{expected:02X}"
+            )
+        return True
+
 # ─── Couche commandes ─────────────────────────────────────────────────────────
 class DalyBms:
     """
@@ -481,6 +506,49 @@ class DalyBms:
         self.bms_id  = bms_id
         self.retries = retries
         self.timeout = timeout
+
+    # ── Décodeurs directs (tests offline — payload data sans header) ──────────
+
+    def _decode_soc(self, data: bytes) -> "SocData":
+        """Décode 8 octets de données SOC (sans header ni CRC)."""
+        bms_id   = getattr(self, "bms_id", 0)
+        pack_v   = struct.unpack(">H", data[0:2])[0] / 100.0
+        raw_cur  = struct.unpack(">H", data[2:4])[0]
+        current  = (raw_cur - 30000) / 10.0
+        soc      = struct.unpack(">H", data[4:6])[0] / 100.0
+        return SocData(
+            bms_id=bms_id, timestamp=time.time(),
+            pack_voltage=pack_v, pack_current=current,
+            soc=soc, power=round(pack_v * current, 1),
+        )
+
+    def _decode_cell_voltages(self, data: bytes) -> "CellVoltages":
+        """Décode N×2 octets de tensions cellules (big-endian mV)."""
+        bms_id   = getattr(self, "bms_id", 0)
+        voltages = []
+        for i in range(len(data) // 2):
+            v = struct.unpack(">H", data[i * 2: i * 2 + 2])[0]
+            if v > 0:
+                voltages.append(float(v))
+        if not voltages:
+            return CellVoltages(bms_id, time.time(), [], 0.0, 0.0, 0.0, 0.0)
+        avg = round(sum(voltages) / len(voltages), 1)
+        return CellVoltages(
+            bms_id=bms_id, timestamp=time.time(),
+            voltages=voltages, average=avg,
+            minimum=min(voltages), maximum=max(voltages),
+            delta=round(max(voltages) - min(voltages), 1),
+        )
+
+    def _decode_temperatures(self, data: bytes) -> "Temperatures":
+        """Décode N octets de températures (encodage +40°C, 0=non utilisé)."""
+        bms_id = getattr(self, "bms_id", 0)
+        temps  = [
+            round(float(b - 40), 1)
+            for b in data
+            if b != 0
+        ]
+        return Temperatures(bms_id=bms_id, timestamp=time.time(), temps=temps)
 
     # ── Envoi / Réception générique ───────────────────────────────────────────
     async def _query(self, cmd: Cmd, resp_data_len: int,

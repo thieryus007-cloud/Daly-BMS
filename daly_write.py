@@ -22,6 +22,10 @@ from daly_protocol import (
 
 log = logging.getLogger("daly.write")
 
+
+class ValidationError(ValueError):
+    """Valeur hors des limites autorisées pour une commande d'écriture BMS."""
+
 # ─── Codes de commandes d'écriture ────────────────────────────────────────────
 class WriteCmd(IntEnum):
     # Contrôle MOS (réutilisés depuis D1 pour cohérence)
@@ -99,6 +103,10 @@ class Limits:
     BALANCE_V_MAX       = 3.65
     BALANCE_DELTA_MIN   = 5      # mV
     BALANCE_DELTA_MAX   = 500    # mV
+
+    # SOC
+    SOC_MIN             = 0.0
+    SOC_MAX             = 100.0
 
     # Pack
     CAPACITY_MIN        = 10     # Ah
@@ -178,6 +186,10 @@ class CommandQueue:
             finally:
                 self._queue.task_done()
 
+    async def enqueue(self, cmd: Any) -> None:
+        """Ajoute une commande brute dans la queue (utilisé par les tests)."""
+        await self._queue.put(cmd)
+
     async def submit(self, coro: Coroutine, description: str = "") -> WriteResult:
         """Soumet une coroutine à la file et attend son résultat."""
         loop = asyncio.get_event_loop()
@@ -204,6 +216,16 @@ class DalyWriter:
         self.bms   = bms
         self.queue = queue
         self.bms_id = bms.bms_id
+
+    # ── Validation (accessible depuis les tests) ──────────────────────────────
+
+    def _validate_cell_voltage(self, voltage_v: float) -> float:
+        """Vérifie qu'une tension cellule est dans la plage admissible."""
+        if not Limits.CELL_V_MIN <= voltage_v <= Limits.CELL_V_MAX:
+            raise ValidationError(
+                f"Tension cellule hors plage [{Limits.CELL_V_MIN}, {Limits.CELL_V_MAX}]V : {voltage_v}"
+            )
+        return voltage_v
 
     # ── Utilitaires internes ──────────────────────────────────────────────────
     def _v_to_raw(self, v: float, unit: str = "mV10") -> int:
