@@ -7,12 +7,19 @@ Conçue pour le Raspberry Pi CM5, installation solaire Santuario.
 Pack A (BMS 0x01) ──┐
 Pack B (BMS 0x02) ──┤
 Pack C (BMS 0x03) ──┼── RS485/USB ── RPi CM5 ── FastAPI ── Dashboard React
-Pack D (BMS 0x04) ──┘                              │
-  (jusqu'à 32)                                     ├── MQTT (Mosquitto)
-                                                   ├── InfluxDB + Grafana
+Pack D (BMS 0x04) ──┘      [natif]                 │          [natif]
+  (jusqu'à 32)                                     │
+                                                   ├── Mosquitto  ─┐
+                                                   ├── InfluxDB    ├─ Docker
+                                                   ├── Grafana     │  (Phase 1)
+                                                   ├── Node-RED  ──┘
                                                    ├── Alertes (Telegram/Email)
                                                    └── Venus OS Bridge
 ```
+
+> **Stratégie de déploiement en deux phases :**
+> - **Phase 1 (actuelle)** — Infrastructure (Mosquitto, InfluxDB, Grafana, Node-RED) dans Docker. Scripts Python et Dashboard tournent nativement sur le Pi.
+> - **Phase 2 (après validation)** — Stack complète dans Docker, y compris `daly_api` et le Dashboard.
 
 > **RS485** supporte jusqu'à 32 BMS par segment (standard TIA-485) et 255 adresses selon
 > le protocole Daly. En pratique, 4 BMS sur un seul adaptateur USB/RS485 fonctionne
@@ -24,6 +31,7 @@ Pack D (BMS 0x04) ──┘                              │
 
 - [Architecture](#architecture)
 - [Prérequis](#prérequis)
+- [Infrastructure Docker — Phase 1](#infrastructure-docker--phase-1)
 - [Installation rapide](#installation-rapide)
 - [Configuration](#configuration)
 - [Démarrage](#démarrage)
@@ -71,7 +79,91 @@ BMS UART ──► DalyWriteManager.poll_loop()
 - **Matériel** : Raspberry Pi CM5 (ou Pi 4/5) + adaptateur USB/RS485
 - **OS** : Debian Bookworm ou Ubuntu 24.04
 - **Python** : 3.11+
+- **Docker** : 24+ avec Docker Compose v2 (`docker compose`)
+- **Node.js** : 20 LTS (dashboard dev uniquement)
 - **Connexion BMS** : port RS485 sur `/dev/ttyUSB1` (ou `/dev/ttyUSB0`)
+
+---
+
+## Infrastructure Docker — Phase 1
+
+Mosquitto, InfluxDB, Grafana et Node-RED tournent dans des containers Docker.
+Les ports sont exposés sur l'hôte : les scripts Python natifs se connectent à
+`localhost:1883` / `localhost:8086` **sans aucun changement de `.env`**.
+
+### Démarrage rapide
+
+```bash
+# 1. Copier et personnaliser les credentials Docker
+cp .env.docker.example .env.docker
+nano .env.docker          # changer les mots de passe et le token InfluxDB
+
+# 2. Démarrer la stack
+make up
+```
+
+### Commandes disponibles
+
+| Commande | Action |
+|----------|--------|
+| `make up` | Démarrer tous les services |
+| `make down` | Arrêter (données conservées) |
+| `make restart` | Redémarrer |
+| `make logs` | Logs temps réel de tous les services |
+| `make logs-grafana` | Logs d'un service spécifique |
+| `make ps` | État des containers |
+| `make pull` | Mettre à jour les images |
+| `make reset` | ⚠ Supprimer containers ET volumes |
+
+### Services et ports
+
+| Service | URL / Port | Description |
+|---------|-----------|-------------|
+| **Mosquitto** | `localhost:1883` | MQTT broker |
+| **Mosquitto WS** | `localhost:9001` | MQTT over WebSocket (Node-RED) |
+| **InfluxDB** | `http://localhost:8086` | Time-series, console admin |
+| **Grafana** | `http://localhost:3001` | Dashboards (dashboard BMS pré-chargé) |
+| **Node-RED** | `http://localhost:1880` | Automatisation et flows |
+
+> Le port Grafana est **3001** (le 3000 est réservé au serveur de dev Vite).
+
+### Initialisation InfluxDB
+
+Au premier `make up`, InfluxDB se configure automatiquement (org, bucket, token)
+à partir des valeurs dans `.env.docker`. Aucune action manuelle requise.
+
+### Grafana
+
+Le dashboard `daly_bms_grafana.json` est automatiquement provisionné au démarrage.
+La datasource InfluxDB est également pré-configurée — accès immédiat sans configuration manuelle.
+
+Identifiants par défaut (modifiables dans `.env.docker`) :
+```
+URL      : http://localhost:3001
+Login    : admin
+Password : (valeur GRAFANA_PASSWORD dans .env.docker)
+```
+
+### Fichiers de configuration Docker
+
+```
+docker-compose.infra.yml                  ← stack principale
+.env.docker.example                       ← template credentials (copier en .env.docker)
+Makefile                                  ← commandes make
+docker/
+  mosquitto/mosquitto.conf                ← MQTT listener + WebSocket + persistance
+  grafana/provisioning/
+    datasources/influxdb.yml              ← datasource InfluxDB auto-configurée
+    dashboards/provider.yml               ← chargement auto du dashboard JSON
+```
+
+### Phase 2 — Intégration future (après validation Daly + Dashboard)
+
+Quand les tests BMS et le dashboard React seront validés, on ajoutera :
+- `Dockerfile` pour les scripts Python (`daly_api`, bridges)
+- `Dockerfile` multi-stage pour le dashboard (build Node.js → Nginx)
+- Accès port série `/dev/ttyUSB0` via `devices:` dans Compose
+- Fusion en `docker-compose.yml` unique avec `make up` global
 
 ---
 
@@ -202,10 +294,9 @@ curl http://localhost:8000/api/v1/system/status
 ### Ordre de démarrage recommandé
 
 ```
-1. mosquitto   (si MQTT utilisé)
-2. influxdb    (si InfluxDB utilisé)
-3. dalybms-api (inclut AlertBridge, MqttBridge, InfluxBridge)
-4. dalybms-venus (optionnel, Venus OS)
+1. make up             → Mosquitto, InfluxDB, Grafana, Node-RED (Docker)
+2. systemctl start dalybms-api   → API + AlertBridge + MqttBridge + InfluxBridge
+3. systemctl start dalybms-venus → Bridge Venus OS (optionnel)
 ```
 
 > **Note :** Depuis la Phase 3, les bridges MQTT, InfluxDB et Alertes s'exécutent
@@ -392,21 +483,25 @@ curl -X POST http://dalybms.local/api/v1/alerts/snooze/1/cell_delta_high \
 ## Développement local
 
 ```bash
-# Cloner et préparer l'environnement
+# 1. Cloner et préparer l'environnement Python
 git clone <repo>
 cd Daly-BMS
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
-# Copier et adapter la config
-cp .env.example .env
-# Éditer .env : DALY_PORT, INFLUX_TOKEN, etc.
+# 2. Démarrer l'infrastructure Docker (Mosquitto, InfluxDB, Grafana, Node-RED)
+cp .env.docker.example .env.docker   # éditer credentials
+make up
 
-# Lancer l'API
+# 3. Copier et adapter la config Python
+cp .env.example .env
+# Éditer .env : DALY_PORT, INFLUX_TOKEN (même valeur que dans .env.docker), etc.
+
+# 4. Lancer l'API
 python daly_api.py
 
-# Dashboard en mode dev (proxy vers API:8000)
+# 5. Dashboard en mode dev (proxy vers API:8000)
 cd dashboard
 npm install
 npm run dev
@@ -592,27 +687,39 @@ curl -s "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
 
 ```
 Daly-BMS/
-├── daly_protocol.py        # D1 — Protocole UART Daly
-├── daly_write.py           # D2 — Commandes écriture BMS
-├── daly_api.py             # D3 — API REST + WebSocket + bridges
-├── daly_mqtt.py            # D4 — Publication MQTT
-├── daly_influx.py          # D5 — Écriture InfluxDB
-├── daly_alerts.py          # D6 — Moteur d'alertes
-├── daly_venus.py           # D7 — Bridge Venus OS
+├── daly_protocol.py          # D1 — Protocole UART Daly
+├── daly_write.py             # D2 — Commandes écriture BMS
+├── daly_api.py               # D3 — API REST + WebSocket + bridges
+├── daly_mqtt.py              # D4 — Publication MQTT
+├── daly_influx.py            # D5 — Écriture InfluxDB
+├── daly_alerts.py            # D6 — Moteur d'alertes
+├── daly_venus.py             # D7 — Bridge Venus OS
 ├── dashboard/
 │   ├── src/
-│   │   ├── App.jsx         # SPA React — 8 pages de monitoring
+│   │   ├── App.jsx           # SPA React — 8 pages de monitoring
 │   │   └── main.jsx
 │   ├── package.json
-│   └── vite.config.js      # Proxy /api → :8000, /ws → ws://:8000
-├── .env.example            # Template de configuration
-├── install.sh              # Script d'installation complet
-├── update.sh               # Mise à jour rapide
-├── backup.sh               # Sauvegarde données/config
+│   └── vite.config.js        # Proxy /api → :8000, /ws → ws://:8000
+│
+├── docker-compose.infra.yml  # Stack Docker infra (Phase 1)
+├── Makefile                  # make up/down/logs/status/pull/reset
+├── docker/
+│   ├── mosquitto/
+│   │   └── mosquitto.conf    # MQTT 1883 + WebSocket 9001
+│   └── grafana/
+│       └── provisioning/
+│           ├── datasources/influxdb.yml   # Datasource auto-configurée
+│           └── dashboards/provider.yml    # Chargement auto dashboard JSON
+│
+├── .env.example              # Template config Python (scripts natifs)
+├── .env.docker.example       # Template config Docker (credentials infra)
+├── daly_bms_grafana.json     # Dashboard Grafana (monté dans Grafana Docker)
+├── install.sh                # Script d'installation complet
+├── update.sh                 # Mise à jour rapide
+├── backup.sh                 # Sauvegarde données/config
 ├── requirements.txt
 ├── requirements-test.txt
-├── test_suite.py
-└── daly_bms_grafana.json   # Dashboard Grafana importable
+└── test_suite.py
 ```
 
 ---
@@ -621,11 +728,13 @@ Daly-BMS/
 
 | Service | URL | Description |
 |---------|-----|-------------|
-| Dashboard | `http://dalybms.local/` | Interface React temps réel |
-| API docs | `http://dalybms.local/docs` | Swagger UI interactif |
-| Grafana | `http://dalybms.local/grafana/` | Graphiques historiques |
-| InfluxDB | `http://dalybms.local:8086` | Console InfluxDB |
-| API health | `http://dalybms.local/health` | Status JSON |
+| **Dashboard** | `http://dalybms.local/` | Interface React temps réel |
+| **API docs** | `http://dalybms.local/docs` | Swagger UI interactif |
+| **API health** | `http://dalybms.local/health` | Status JSON |
+| **Grafana** | `http://dalybms.local:3001` | Graphiques historiques (Docker) |
+| **InfluxDB** | `http://dalybms.local:8086` | Console admin InfluxDB (Docker) |
+| **Node-RED** | `http://dalybms.local:1880` | Éditeur de flows (Docker) |
+| **MQTT** | `dalybms.local:1883` | Broker Mosquitto (Docker) |
 
 ---
 
